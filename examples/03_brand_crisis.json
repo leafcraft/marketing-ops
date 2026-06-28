@@ -1,0 +1,17 @@
+{
+  "_entry_point": "crisis_response",
+  "_description": "PR signal \u2014 bad press cycle starts. brand_guardian drafts holding statement, escalates to CMO + legal.",
+  "payload": {
+    "crisis_id": "crisis-2026-0604-001",
+    "signal_source": "social_media_monitoring",
+    "signal_summary": "Industry blog published critique alleging data-handling concerns. ~3.4K engagements in first 4 hours; momentum increasing.",
+    "severity_estimate": 0.7,
+    "crisis_type_hint": "brand_safety",
+    "exposure_channels": [
+      "twitter",
+      "hacker_news",
+      "linkedin"
+    ],
+    "factual_status": "claims_disputed_internally"
+  }
+}

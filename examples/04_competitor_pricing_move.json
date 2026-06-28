@@ -1,0 +1,17 @@
+{
+  "_entry_point": "competitor_move",
+  "_description": "Competitor cut prices 20% \u2014 market_intelligence scans the move, recommends defensive/offensive posture.",
+  "payload": {
+    "signal_id": "comp-move-2026-0604",
+    "competitor_name": "Acme Alternative",
+    "move_type": "pricing_cut",
+    "details": {
+      "product_line": "Pro tier",
+      "old_price_cents": 245000,
+      "new_price_cents": 199000,
+      "delta_pct": -0.188
+    },
+    "effective_date": "2026-06-01",
+    "impacted_pipeline_deals": 23
+  }
+}

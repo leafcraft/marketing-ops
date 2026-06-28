@@ -1,0 +1,1171 @@
+# marketing-ops — Marketing Ops (campaign & growth)
+#
+# Marketing team — campaign briefs land via many channels (form, email,
+# product-launch, competitor signal, crisis). The team plans audience +
+# strategy, drafts copy + visuals, reviews compliance, publishes
+# across channels, and analyses performance. Marketing manager, legal
+# reviewer, and CMO carry the human roles.
+
+name: "marketing-ops"
+version: "1.0.0"
+architecture: "managed_mesh"
+environment: "development"
+debug: true
+log_level: "INFO"
+
+redis:
+  host: "${REDIS_HOST:localhost}"
+  port: ${REDIS_PORT:6379}
+  db: 0
+  password: "${REDIS_PASSWORD:}"
+  auto_storage: true
+  decode_responses: true
+  default_ttl: 86400
+  session_ttl: 604800
+
+auto_discover:
+  directory: "./agency"
+  pattern: "*_agent.py"
+  recursive: false
+
+# ═══════════════════════════════════════════════════════════════════
+# MANAGER — supervisor over the marketing team
+# ═══════════════════════════════════════════════════════════════════
+manager:
+  enabled: true
+  model: "gpt-4o-mini"
+  domain: "generic"
+  can_intervene: true
+
+  prompt: |
+    This mesh runs marketing operations. A successful campaign turn:
+      - campaign_strategist_agent normalises the brief from any source,
+        then builds strategy + KPI + budget plan
+      - market_intelligence_agent covers audience segments + personas
+        AND the competitor landscape (one analyst role)
+      - copywriter_agent + visual_briefer_agent fan out
+      - compliance_reviewer_agent gates brand + legal safety
+      - marketing manager / legal / CMO HITL
+      - publisher_agent dispatches to channels
+      - marketing_analytics_agent post-launch — KPI status, multi-touch
+        attribution and email-engagement benchmarks read from YOUR
+        analytics platform (GA4 / Amplitude / Looker) via its n8n
+        connector
+      - campaign_orchestrator_agent weekly sweep — live-campaign state
+        read from YOUR MAP (Marketo / HubSpot) via its n8n connector
+      - brand_guardian_agent judges brand sentiment rollups fed by your
+        social-listening platform and runs the crisis fast-path when a
+        spike or PR signal lands
+      - social_media_agent drafts per-platform variants + a posting
+        plan for your social scheduler; triages replies in triage mode
+      - aeo_geo_optimiser_agent audits content for AI-answer-engine
+        pickup
+
+    Escalate when:
+      - compliance flags brand or regulated-claim risk
+      - budget > 50K or competitor crisis-level signal
+      - audience targeting overlaps protected attributes
+      - performance deviates > 2 sigma from forecast
+
+    Watch for:
+      - claim drift across copy variants
+      - audience fatigue (frequency cap breach)
+      - channel mix shift away from forecast
+
+  routing:
+    mode: "learning"
+    memory_size: 250
+    confidence_threshold: 0.7
+    fallback: "all"
+    decay_days: 30
+
+  knowledge:
+    serviceName: "mongo_main"
+    enabled: true
+    groupName: "marketing_runbook"
+
+  escalation:
+    targets:
+      - type: "human_agent"
+        agent: "cmo_human"
+      - type: "webhook"
+        url: "${PAGER_WEBHOOK:https://events.pagerduty.com/v2/enqueue}"
+        method: "POST"
+        headers:
+          Content-Type: "application/json"
+        payload_template:
+          incident_id: "{{campaign_id}}"
+          severity: "{{severity}}"
+          message: "{{message}}"
+          session_id: "{{session_id}}"
+      - type: "channel"
+        provider: "slack"
+        channel_id: "${SLACK_MARKETING_CHANNEL:}"
+        message_template: "[marketing] {{message}} — campaign {{campaign_id}}"
+
+    auto_escalate:
+      max_retries: 2
+      max_errors_per_session: 3
+      timeout_threshold: 2
+
+  health_check_interval: 60
+  agent_timeout_threshold: 300
+  chain_completion_timeout: 600
+
+mesh:
+  call_timeout: 120
+
+# ═══════════════════════════════════════════════════════════════════
+# DATA STRUCTURES
+# ═══════════════════════════════════════════════════════════════════
+data_structures:
+  CampaignBrief:
+    type: "object"
+    properties:
+      campaign_id: { type: "string" }
+      brief_source: { type: "string" }
+      product_or_topic: { type: "string" }
+      target_market: { type: "string" }
+      objectives: { type: "list" }
+      budget_cents: { type: "number" }
+      received_at_utc: { type: "string" }
+    required: ["campaign_id", "brief_source"]
+
+# ═══════════════════════════════════════════════════════════════════
+# ENTRY POINTS — Rule 1: many starting paths
+# ═══════════════════════════════════════════════════════════════════
+entry_points:
+  - name: "new_brief"
+    target: "campaign_strategist_agent"
+    description: "Marketing brief submitted via form / email / Asana — strategist normalises it first"
+
+  - name: "product_launch"
+    target: "campaign_strategist_agent"
+    description: "Product team triggers cross-functional launch"
+
+  - name: "competitor_move"
+    target: "market_intelligence_agent"
+    description: "Reactive — competitor pricing, launch, or campaign signal"
+
+  - name: "quarterly_planning"
+    target: "campaign_strategist_agent"
+    description: "Cadence — quarterly portfolio planning kick-off"
+
+  - name: "crisis_response"
+    target: "brand_guardian_agent"
+    description: "Brand / PR crisis — fast-path response coordination"
+
+  - name: "email_campaign_ingest"
+    target: "marketing_analytics_agent"
+    description: "Push one email campaign's engagement metrics through the analytics connector (pass mode=ingest — the ledger lives in your analytics platform)"
+
+  - name: "email_post_send_analysis"
+    target: "marketing_analytics_agent"
+    description: "Analyse one campaign's engagement vs segment 30d baseline via the analytics connector (pass mode=report)"
+
+  - name: "brand_mention_ingest"
+    target: "brand_guardian_agent"
+    description: "Brand-mention signal from your social-listening platform (pass mode=ingest + the platform's sentiment rollups)"
+
+  - name: "brand_sentiment_sweep"
+    target: "brand_guardian_agent"
+    description: "Sentiment sweep — pass mode=report + rollups from your social-listening platform; the guardian judges spike severity"
+
+  - name: "weekly_performance"
+    target: "campaign_orchestrator_agent"
+    description: "Weekly performance sweep across live campaigns (campaign state read from your MAP)"
+
+  - name: "manual_action"
+    target: "campaign_strategist_agent"
+    description: "Marketing-team-initiated action"
+
+# ═══════════════════════════════════════════════════════════════════
+# AGENTS — Marketing team
+# ═══════════════════════════════════════════════════════════════════
+
+# ── Direct-call entry points (every non-human, non-terminal
+#    agent is API-addressable; bypasses the upstream chain).
+#    Use for ad-hoc invocation, debugging, programmatic ingest.
+  - name: "direct_call_market_intelligence"
+    target: "market_intelligence_agent"
+    description: "On-demand direct call to market_intelligence (llm) — bypasses upstream chain"
+
+  - name: "direct_call_copywriter"
+    target: "copywriter_agent"
+    description: "On-demand direct call to copywriter (llm) — bypasses upstream chain"
+
+  - name: "direct_call_visual_briefer"
+    target: "visual_briefer_agent"
+    description: "On-demand direct call to visual_briefer (llm) — bypasses upstream chain"
+
+  - name: "direct_call_compliance_reviewer"
+    target: "compliance_reviewer_agent"
+    description: "On-demand direct call to compliance_reviewer (llm) — bypasses upstream chain"
+
+  - name: "direct_call_publisher"
+    target: "publisher_agent"
+    description: "On-demand direct call to publisher (programmatic) — bypasses upstream chain"
+
+  - name: "direct_call_marketing_analytics"
+    target: "marketing_analytics_agent"
+    description: "On-demand direct call to marketing_analytics (n8n connector) — bypasses upstream chain"
+
+  # ── Lyzr-inspired agents (added in 2.3.x) ──
+  - name: "schedule_social_posts"
+    target: "social_media_agent"
+    description: "Schedule a campaign across LinkedIn/Twitter/Instagram/TikTok (mode=schedule)"
+
+  - name: "triage_social_replies"
+    target: "social_media_agent"
+    description: "Classify incoming engagement; escalate angry/crisis (mode=triage)"
+
+  - name: "aeo_geo_content_audit"
+    target: "aeo_geo_optimiser_agent"
+    description: "Score existing pages for AI-answer-engine pickup; recommend rewrites"
+
+
+agents:
+
+  # ────────────────────────────────────────────────────────────
+  # market_intelligence_agent — ONE analyst role (Rule 2):
+  # audience segments/personas + competitor landscape
+  # (merged: the former audience-intelligence + competitor-intel roles)
+  # Self-reliant LLM — agency/market_intelligence_agent.py wraps it:
+  #   @pre_compose load_market_data pulls segments + past performance +
+  #   competitor signals from the dev store (CDP / intel platform in
+  #   prod); @chain enforce_threat_floor force-merges any high/critical/
+  #   severe competitor into threat_alerts so the crisis fast-path fires
+  #   even if the LLM under-reports. Narrative lives in the prompt.
+  # ────────────────────────────────────────────────────────────
+  market_intelligence_agent:
+    name: "market_intelligence_agent"
+    agent_type: "llm"
+    description: "Market intelligence analyst — audience segments + persona scores AND the competitor landscape for the brief"
+    model: "gpt-4o-mini"
+    temperature: 0.3
+    max_tokens: 1800
+    communication_type: "dual"
+    prompt: |
+      You are the market intelligence analyst on a marketing team.
+      For every request, do BOTH responsibilities and return ONE JSON
+      object containing ALL keys below.
+
+      1. Audience intelligence — segment the market for this brief:
+         - primary_segments: list of segment names ranked by fit
+         - persona_scores: list of {persona, fit_score, why}
+         - estimated_reach: number — addressable audience size estimate
+         - exclusion_signals: list of audience traits to EXCLUDE for safety
+         - frequency_cap_recommendation: number — max impressions per user per week
+
+      2. Competitor landscape — competitive snapshot for this market:
+         - competitor_summary: list of objects (name, recent_move, threat_level)
+         - market_share_signals: short text summary
+         - whitespace_opportunities: list of unaddressed positions
+         - threat_alerts: list — imminent threats requiring CMO awareness
+         - intel_briefing: 3-4 sentence narrative for the marketing manager.
+          Lead with the top threat OR opportunity. Cite 1-2 strongest
+          competitors. Recommend defensive or offensive posture.
+
+      Rules (apply exactly):
+      1. frequency_cap_recommendation: a concrete number of impressions
+         per user per week — when uncertain, use 3.
+      2. estimated_reach: a number (use 0 when unknown), never prose.
+      3. intel_briefing must NEVER be empty — with thin input, state how
+         many competitors are tracked, the top threat if any, the count
+         of whitespace opportunities, and recommend a defensive posture
+         when threat_alerts is non-empty (offensive otherwise).
+      4. threat_alerts: ONLY imminent threats that warrant CMO
+         awareness — an empty list is the normal case.
+
+      OUTPUT CONTRACT — respond with ONLY valid JSON containing exactly these keys:
+      {"primary_segments": [], "persona_scores": [], "estimated_reach": 0, "exclusion_signals": [], "frequency_cap_recommendation": 0, "competitor_summary": [], "market_share_signals": "", "whitespace_opportunities": [], "threat_alerts": [], "intel_briefing": ""}
+    enforce_yields: true
+    enforce_yields_retry: 2
+    knowledge:
+      serviceName: "mongo_main"
+      enabled: true
+      groupName: "competitor_intel"
+    yields:
+      primary_segments: "list"
+      persona_scores: "list"
+      estimated_reach: "number"
+      exclusion_signals: "list"
+      frequency_cap_recommendation: "number"
+      competitor_summary: "list"
+      market_share_signals: "string"
+      whitespace_opportunities: "list"
+      threat_alerts: "list"
+      intel_briefing: "string"
+    inputs:
+      upstream_yields: "object"
+    can_call:
+      - agent: "campaign_strategist_agent"
+      - agent: "brand_guardian_agent"
+        condition: "calling_agent_response.threat_alerts != []"
+
+  # ────────────────────────────────────────────────────────────
+  # campaign_strategist_agent — self-reliant strategist hub. Its
+  # module (agency/campaign_strategist_agent.py) wraps it:
+  #   @pre_compose load_planning_context pulls the brief + audience
+  #     segments + past-campaign performance + competitor signals +
+  #     the brand spend ceiling from the dev store (connectors in prod);
+  #   @compose ships market_intelligence / copywriter / visual_briefer
+  #     each the payload IT needs;
+  #   @chain enforce_spend_floor forces requires_cmo_escalation=true when
+  #     total planned budget exceeds the brand's max-unapproved-spend
+  #     ceiling — the LLM cannot waive the CMO gate.
+  # Brief-normalisation + strategy narrative live in the prompt below.
+  # ────────────────────────────────────────────────────────────
+  campaign_strategist_agent:
+    name: "campaign_strategist_agent"
+    agent_type: "llm"
+    description: "Campaign strategist — normalises the incoming brief, then builds strategy, KPIs, channel mix, budget allocation"
+    model: "gpt-4o-mini"
+    temperature: 0.2
+    max_tokens: 1500
+    communication_type: "chain"
+    wait_for: "market_intelligence_agent"
+    prompt: |
+      You are the campaign strategist on a marketing team. Your
+      responsibilities, in order:
+
+      1. Normalise the brief — raw briefs arrive from form / email /
+         launch events / Asana. Extract the canonical CampaignBrief
+         fields from the payload, applying these rules exactly:
+         - campaign_id: reuse any id present in the payload or upstream
+           context; otherwise mint one as "camp-" followed by 10 random
+           lowercase hex characters.
+         - brief_source: from the payload (form / email / launch / …),
+           default "manual" when absent.
+         - product_or_topic, target_market: copy from the payload,
+           "" when absent.
+         - objectives: list from the payload, [] when absent.
+         - budget_cents: integer, 0 when unknown.
+         - received_at_utc: ISO-8601 UTC timestamp from the payload
+           when present, else "".
+         Anchor your strategy on these fields and echo them in your
+         output.
+
+      2. Build the campaign strategy.
+         Return JSON with these keys (all required):
+        - campaign_id: string
+        - strategy_summary: 2-3 sentence narrative for the marketing
+          manager — lead with the angle, name the primary segment + KPI.
+          Never leave it empty.
+        - kpis: list of objects (name, target, measurement_window)
+        - channel_mix: list of objects (channel, share_pct, rationale)
+        - budget_allocation: list of objects (channel, budget_cents)
+        - timeline_weeks: number — recommended campaign duration
+          (default 4 when unsure)
+        - requires_legal_review: boolean — true on regulated industry
+          claims (finance / health / etc.) OR comparative claims
+        - requires_cmo_escalation: boolean — your best judgment on
+          whether total budget warrants CMO sign-off. (A deterministic
+          spend floor in the strategist module RECOMPUTES this from the
+          summed budget_allocation vs the brand's $50K ceiling and will
+          override you — set it honestly, but the floor is the authority.)
+
+      3. Routing flag — set needs_market_intelligence to true ONLY on
+         a fresh brief: your input carries NO market-intelligence
+         yields (primary_segments / persona_scores / competitor_summary
+         / intel_briefing) AND no human revision message
+         (human_message). On an intel call-back or a HITL revision set
+         it false so the flow fans out to creative instead of
+         ping-ponging back to the analyst. When human_message is
+         present, treat it as the revision instruction and re-plan.
+
+      OUTPUT CONTRACT — respond with ONLY valid JSON containing exactly these keys:
+      {"campaign_id": "", "strategy_summary": "", "kpis": [], "channel_mix": [], "budget_allocation": [], "timeline_weeks": 0, "requires_legal_review": false, "brief_source": "", "product_or_topic": "", "target_market": "", "objectives": [], "budget_cents": 0, "received_at_utc": "", "needs_market_intelligence": false, "requires_cmo_escalation": false}
+    enforce_yields: true
+    enforce_yields_retry: 2
+    knowledge:
+      serviceName: "mongo_main"
+      enabled: true
+      groupName: "campaign_playbooks"
+    yields:
+      campaign_id: "string"
+      strategy_summary: "string"
+      kpis: "list"
+      channel_mix: "list"
+      budget_allocation: "list"
+      timeline_weeks: "number"
+      requires_legal_review: "boolean"
+      # Canonical brief fields (absorbed brief_intake responsibility —
+      # extracted per the normalisation rules in the prompt)
+      brief_source: "string"
+      product_or_topic: "string"
+      target_market: "string"
+      objectives: "list"
+      budget_cents: "number"
+      received_at_utc: "string"
+      # Routing flag — true on a fresh brief with no market
+      # intelligence upstream yet (prevents the strategist ↔
+      # market_intelligence ping-pong); rule lives in the prompt
+      needs_market_intelligence: "boolean"
+      # Deterministic spend floor — set by @chain enforce_spend_floor when
+      # total budget exceeds the brand's $50K ceiling (the LLM cannot waive)
+      requires_cmo_escalation: "boolean"
+    inputs:
+      upstream_yields: "object"
+      payload: "object"
+    can_call:
+      # Budget over the brand ceiling → CMO sign-off BEFORE creative spend
+      # (deterministic floor; takes precedence over the fan-out below).
+      - agent: "cmo_human"
+        condition: "calling_agent_response.requires_cmo_escalation == true"
+      - agent: "market_intelligence_agent"
+        condition: "calling_agent_response.needs_market_intelligence == true and calling_agent_response.requires_cmo_escalation == false"
+      - agent: "copywriter_agent"
+        condition: "calling_agent_response.needs_market_intelligence == false and calling_agent_response.requires_cmo_escalation == false"
+      - agent: "visual_briefer_agent"
+        condition: "calling_agent_response.needs_market_intelligence == false and calling_agent_response.requires_cmo_escalation == false"
+    auto_store_response: true
+    auto_store_yields: true
+
+  # ────────────────────────────────────────────────────────────
+  # copywriter_agent — self-reliant copywriter. Its module
+  # (agency/copywriter_agent.py) wraps it: @pre_compose load_brand_voice
+  # pulls the brand voice + tone rules + banned-claim lexicon so it
+  # drafts in-voice; @chain flag_banned_in_copy scans the drafted copy
+  # and forces has_protected_claims=true on any banned-term slip.
+  # ────────────────────────────────────────────────────────────
+  copywriter_agent:
+    name: "copywriter_agent"
+    agent_type: "llm"
+    description: "Drafts 3 copy variants per channel — A/B/C for test-and-learn"
+    model: "gpt-4o-mini"
+    temperature: 0.7
+    max_tokens: 2000
+    communication_type: "chain"
+    prompt: |
+      Draft copy variants for each channel in the campaign mix.
+      Return JSON with these keys (all required):
+        - variants_by_channel: list of objects (channel, variants list)
+        - tone_used: string — descriptor of the chosen tone
+        - reading_grade: number — Flesch-Kincaid estimate
+        - has_protected_claims: boolean — flags claims needing legal
+        - copy_briefing: 2 sentence narrative for the manager — number
+          of variants, primary tone, any flagged claims
+
+      Rules (apply exactly):
+      1. tone_used: default "professional" when the brief does not
+         dictate a tone.
+      2. reading_grade: target around 8 for broad-reach channels;
+         always a number, never prose.
+      3. has_protected_claims: true when ANY variant makes a regulated
+         (finance / health), comparative, or superiority claim.
+      4. copy_briefing must never be empty — variant count, channel
+         count, tone, reading grade, and whether claims were flagged.
+      5. When invoked after a human "revise" decision, treat
+         human_message as the revision instruction and redraft —
+         proceed with whatever campaign context is available (a draft
+         is internal; fail-soft).
+
+      OUTPUT CONTRACT — respond with ONLY valid JSON containing exactly these keys:
+      {"variants_by_channel": [], "tone_used": "", "reading_grade": 0, "has_protected_claims": false, "copy_briefing": ""}
+    enforce_yields: true
+    enforce_yields_retry: 2
+    yields:
+      variants_by_channel: "list"
+      tone_used: "string"
+      reading_grade: "number"
+      has_protected_claims: "boolean"
+      copy_briefing: "string"
+    inputs:
+      upstream_yields: "object"
+    can_call:
+      - agent: "compliance_reviewer_agent"
+
+  visual_briefer_agent:
+    name: "visual_briefer_agent"
+    agent_type: "llm"
+    description: "Builds the visual creative brief — handoff to image generation or designer"
+    model: "gpt-4o-mini"
+    temperature: 0.6
+    max_tokens: 1500
+    communication_type: "chain"
+    prompt: |
+      Build the visual creative brief for each channel that requires
+      imagery. Return JSON with these keys (all required):
+        - visual_briefs: list of objects (channel, format, aspect_ratio,
+          mood, dominant_colors, must_show, must_avoid)
+        - has_people: boolean — does any brief include people imagery
+        - representation_check: list of audience-representation notes
+        - generation_prompts: list of objects (channel, prompt_for_dalle3)
+        - visual_briefing: 2 sentence narrative for the manager
+
+      Rules (apply exactly):
+      1. visual_briefing must never be empty — brief count, prompt
+         count, and whether people imagery is included.
+      2. When has_people is true, representation_check MUST list
+         audience-representation notes (never empty in that case).
+
+      OUTPUT CONTRACT — respond with ONLY valid JSON containing exactly these keys:
+      {"visual_briefs": [], "has_people": false, "representation_check": [], "generation_prompts": [], "visual_briefing": ""}
+    enforce_yields: true
+    enforce_yields_retry: 2
+    yields:
+      visual_briefs: "list"
+      has_people: "boolean"
+      representation_check: "list"
+      generation_prompts: "list"
+      visual_briefing: "string"
+    inputs:
+      upstream_yields: "object"
+    can_call:
+      - agent: "compliance_reviewer_agent"
+
+  # ────────────────────────────────────────────────────────────
+  # compliance_reviewer_agent — LLM verdict + a DETERMINISTIC floor.
+  # Its module (agency/compliance_reviewer_agent.py):
+  #   @pre_compose load_brand_rules pulls the banned-claim /
+  #     legal-trigger lexicon from the dev store (brand wiki in prod);
+  #   @chain enforce_compliance_floor scans the actual copy variants —
+  #     a banned-claim hit forces approved_for_publish=false; a
+  #     legal-trigger / regulated-industry hit forces
+  #     requires_legal_review=true (the LLM cannot waive either) — THEN
+  #     stashes the reviewed campaign payload keyed by session BEFORE the
+  #     human gate so the fail-closed publisher recovers what was approved.
+  # Briefing narrative + score nuance still live in the prompt.
+  # ────────────────────────────────────────────────────────────
+  compliance_reviewer_agent:
+    name: "compliance_reviewer_agent"
+    agent_type: "llm"
+    description: "Brand-safety + legal-claim review — gates the campaign before approval routing"
+    model: "gpt-4o-mini"
+    temperature: 0.0
+    max_tokens: 1500
+    communication_type: "chain"
+    wait_for: "copywriter_agent AND visual_briefer_agent"
+    prompt: |
+      Review the campaign for brand safety + legal compliance.
+      Return JSON with these keys (all required):
+        - brand_safety_score: 0..1 — confidence the creative is on-brand
+        - flagged_claims: list of objects (claim, channel, risk_level)
+        - required_disclaimers: list of objects (disclaimer_text, channel)
+        - protected_attribute_risk: boolean — any audience targeting
+          edges into protected attributes
+        - requires_legal_review: boolean — true on flagged_claims with
+          risk_level high OR regulated industry
+        - approved_for_publish: boolean — true when no blockers
+        - reviewer_briefing: 3 sentence narrative for the manager.
+          Lead with approved-or-not. Name the strongest concern, if any.
+          Recommend the next step.
+
+      Rules (deterministic — apply exactly, no exceptions):
+      1. requires_legal_review MUST be true when ANY flagged claim has
+         risk_level "high", "critical", or "severe" — OR the campaign
+         touches a regulated industry.
+      2. approved_for_publish is DEFAULT-DENY: set it true ONLY when
+         flagged_claims is empty AND protected_attribute_risk is false
+         AND brand_safety_score >= 0.6. Otherwise it is false.
+      3. Echo campaign_id and strategy_summary verbatim from the
+         campaign context — the manager / legal inbox must see WHICH
+         campaign is on review ("" only when truly absent upstream).
+      4. reviewer_briefing must never be empty.
+
+      OUTPUT CONTRACT — respond with ONLY valid JSON containing exactly these keys:
+      {"brand_safety_score": 0, "flagged_claims": [], "required_disclaimers": [], "protected_attribute_risk": false, "requires_legal_review": false, "approved_for_publish": false, "reviewer_briefing": "", "campaign_id": "", "strategy_summary": ""}
+    enforce_yields: true
+    enforce_yields_retry: 2
+    knowledge:
+      serviceName: "mongo_main"
+      enabled: true
+      groupName: "brand_safety_rules"
+    yields:
+      brand_safety_score: "number"
+      flagged_claims: "list"
+      required_disclaimers: "list"
+      protected_attribute_risk: "boolean"
+      requires_legal_review: "boolean"
+      approved_for_publish: "boolean"
+      reviewer_briefing: "string"
+      # Identity passthrough — manager / legal inbox sees WHICH campaign
+      campaign_id: "string"
+      strategy_summary: "string"
+    inputs:
+      upstream_yields: "object"
+    can_call:
+      - agent: "marketing_manager_human"
+        condition: "calling_agent_response.requires_legal_review == false"
+      - agent: "legal_reviewer_human"
+        condition: "calling_agent_response.requires_legal_review == true"
+
+  # ────────────────────────────────────────────────────────────
+  # publisher_agent — outward actuator behind the human gate. Its
+  # Python module (agency/publisher_agent.py) is intentionally KEPT:
+  # an actuator that spends budget must FAIL CLOSED, and it reads the
+  # approved campaign payload from the pre-gate session stash only —
+  # never from LLM context.
+  # ────────────────────────────────────────────────────────────
+  publisher_agent:
+    name: "publisher_agent"
+    agent_type: "programmatic"
+    description: "Multi-channel publish — Meta, IG, LinkedIn, Email; tags every impression for attribution"
+    communication_type: "chain"
+    yields:
+      published_channels: "list"
+      total_spend_cents: "number"
+      live_variant_ids: "list"
+      published_at_utc: "string"
+      tracking_pixel_set: "boolean"
+    inputs:
+      upstream_yields: "object"
+    can_call:
+      - agent: "marketing_analytics_agent"
+    auto_store_response: true
+    auto_store_yields: true
+
+  # ────────────────────────────────────────────────────────────
+  # marketing_analytics_agent — ONE analytics role (Rule 2):
+  # KPI status + multi-touch attribution + email-engagement
+  # benchmarks. Campaign metrics live in YOUR analytics platform
+  # (GA4 / Amplitude / Looker) — not in template SQLite. Pure
+  # connector-YAML: the n8n workflow queries your platform and MUST
+  # return JSON in EXACTLY the declared yields shape below (lenient
+  # yields enforcement fills any missing key with a type default).
+  # ────────────────────────────────────────────────────────────
+  marketing_analytics_agent:
+    name: "marketing_analytics_agent"
+    agent_type: "programmatic"
+    description: "Marketing analytics connector — KPI status, multi-touch attribution, email engagement benchmarks read from your analytics platform (GA4/Amplitude/Looker)"
+    communication_type: "chain"
+    integration: "n8n"
+    connector_config:
+      # Your analytics-platform workflow URL — the n8n workflow fronts
+      # GA4 / Amplitude / Looker and returns the yields shape below.
+      webhook_url: "${N8N_MARKETING_ANALYTICS_WEBHOOK_URL:}"
+    enforce_yields: true
+    enforce_yields_retry: 2
+    yields:
+      # Performance status (read from your analytics platform)
+      kpi_status: "list"
+      top_performers: "list"
+      underperformers: "list"
+      statistical_significance: "boolean"
+      recommended_actions: "list"
+      analyst_briefing: "string"
+      # Attribution (computed in your analytics platform / warehouse)
+      attribution_model: "string"
+      revenue_attributed_cents: "number"
+      channel_credits: "list"
+      roas_by_channel: "list"
+      attribution_confidence: "number"
+      # Email engagement (ledger + baselines live in your ESP/platform)
+      mode: "string"
+      segment: "string"
+      baseline_campaigns_count: "number"
+      baseline_open_rate: "number"
+      baseline_click_rate: "number"
+      baseline_unsubscribe_rate: "number"
+      target: "object"
+      requires_manager_review: "boolean"
+      spike_for_learning: "boolean"
+      engagement_briefing: "string"
+    inputs:
+      upstream_yields: "object"
+      mode: "string"
+      campaign_id: "string"
+      segment: "string"
+      sent_at_utc: "string"
+      sends: "number"
+      opens: "number"
+      clicks: "number"
+      replies: "number"
+      unsubscribes: "number"
+    can_call:
+      - agent: "marketing_manager_human"
+        condition: "calling_agent_response.requires_manager_review == true"
+      - agent: "marketing_audit_logger_agent"
+    auto_store_response: true
+    auto_store_yields: true
+
+  # ────────────────────────────────────────────────────────────
+  # brand_guardian_agent — ONE guardian role (Rule 2): crisis
+  # response drafting + brand-sentiment spike judgment.
+  # (merged: the former crisis-responder + brand-sentiment-tracker roles)
+  # Sentiment history lives in YOUR social-listening platform
+  # (Brandwatch / Sprout / Talkwalker); rollups arrive via the
+  # brand_mention_ingest / brand_sentiment_sweep entry points.
+  # Its module (agency/brand_guardian_agent.py) adds a DETERMINISTIC
+  # @chain enforce_crisis_floor: in crisis mode requires_cmo_action is
+  # forced TRUE (a crisis ALWAYS lands on the CMO desk); the severe-
+  # negative-spike rule (volume>0.5 AND sentiment<-0.3) is recomputed
+  # from the rollups, not trusted to the LLM, and also forces the route;
+  # regulatory/data-breach forces "legal" into escalate_to.
+  # ────────────────────────────────────────────────────────────
+  brand_guardian_agent:
+    name: "brand_guardian_agent"
+    agent_type: "llm"
+    description: "Brand guardian — tracks brand sentiment + detects spikes; drafts fast-path crisis response when a signal lands"
+    model: "gpt-4o-mini"
+    temperature: 0.1
+    max_tokens: 1500
+    communication_type: "dual"
+    prompt: |
+      You are the brand guardian on a marketing team. Your
+      responsibilities:
+
+      1. Crisis response (your judgment call — mode empty or "crisis")
+         — coordinate response to a brand / PR crisis signal.
+         Return JSON with these keys (all required):
+        - severity: 0..1 — when uncertain, err high (0.8)
+        - crisis_type: EXACTLY one of brand_safety | regulatory |
+          data_breach | competitor_attack | other
+        - immediate_action: short directive — never empty; default
+          "Pause active campaigns; convene crisis team; draft holding
+          statement."
+        - holding_statement_draft: text UNDER 280 characters for the
+          spokesperson — never empty
+        - escalate_to: list of roles to notify — ALWAYS include "cmo";
+          ALSO include "legal" when crisis_type is "regulatory" or
+          "data_breach"
+        - cmo_briefing: 3 sentence narrative — lead with severity + type,
+          the immediate action, the recommended next 2 hours
+        Crisis rules (apply exactly):
+        - requires_cmo_action is ALWAYS true in crisis mode — a crisis
+          lands on the CMO desk no matter how minor it looks
+          (default-deny floor).
+        - Echo campaign_id and strategy_summary from the input when the
+          crisis is tied to a campaign ("" for off-campaign crises).
+        - mode: "crisis"; the sentiment keys echo whatever rollups the
+          input carries (zeros / empty when none).
+
+      2. Brand sentiment review (input mode == "ingest" or "report") —
+         your social-listening platform (Brandwatch / Sprout /
+         Talkwalker) owns the mention ledger and supplies the rollups
+         in the input: mentions_last_7d, mentions_last_30d,
+         avg_sentiment_7d, avg_sentiment_30d, volume_change_pct,
+         top_negative_sources. Echo them into the matching output keys.
+        Sentiment rules (apply exactly):
+        - severe_negative_spike = true ONLY when volume_change_pct >
+          0.5 AND avg_sentiment_7d < -0.3.
+        - requires_cmo_action = severe_negative_spike (sentiment mode
+          only).
+        - Use severity 0 and crisis_type "other"; sentiment_briefing is
+          a one-line summary of mention volume vs the prior period and
+          7d/30d average sentiment; copy it into cmo_briefing.
+        - mode: echo the input mode ("ingest" or "report").
+
+      OUTPUT CONTRACT — respond with ONLY valid JSON containing exactly these keys:
+      {"severity": 0, "crisis_type": "", "immediate_action": "", "holding_statement_draft": "", "escalate_to": [], "cmo_briefing": "", "campaign_id": "", "strategy_summary": "", "mode": "", "mentions_last_7d": 0, "mentions_last_30d": 0, "avg_sentiment_7d": 0, "avg_sentiment_30d": 0, "volume_change_pct": 0, "top_negative_sources": [], "severe_negative_spike": false, "requires_cmo_action": false, "sentiment_briefing": ""}
+    enforce_yields: true
+    enforce_yields_retry: 2
+    yields:
+      # Crisis judgment
+      severity: "number"
+      crisis_type: "string"
+      immediate_action: "string"
+      holding_statement_draft: "string"
+      escalate_to: "list"
+      cmo_briefing: "string"
+      # Identity passthrough — CMO inbox sees WHICH campaign (if any)
+      campaign_id: "string"
+      strategy_summary: "string"
+      # Sentiment rollups (echoed from your social-listening platform)
+      mode: "string"
+      mentions_last_7d: "number"
+      mentions_last_30d: "number"
+      avg_sentiment_7d: "number"
+      avg_sentiment_30d: "number"
+      volume_change_pct: "number"
+      top_negative_sources: "list"
+      severe_negative_spike: "boolean"
+      requires_cmo_action: "boolean"
+      sentiment_briefing: "string"
+    inputs:
+      upstream_yields: "object"
+      mode: "string"
+      # Rollups supplied by your social-listening platform
+      # (Brandwatch / Sprout / Talkwalker)
+      mentions_last_7d: "number"
+      mentions_last_30d: "number"
+      avg_sentiment_7d: "number"
+      avg_sentiment_30d: "number"
+      volume_change_pct: "number"
+      top_negative_sources: "list"
+    narration: |
+      If incoming mentions or replies read angry / hostile toward the
+      brand — even when the formal spike rule has not tripped — treat
+      it as an emerging crisis and consider routing to cmo_human.
+      If negative sentiment concentrates on one live campaign, also
+      consider marketing_manager_human so it can be paused.
+    can_call:
+      # Crisis mode forces requires_cmo_action=true (prompt rule,
+      # default-deny floor); sentiment mode sets it only on a
+      # severe negative spike — one edge carries both fast-paths.
+      - agent: "cmo_human"
+        condition: "calling_agent_response.requires_cmo_action == true"
+      - agent: "legal_reviewer_human"
+        condition: "calling_agent_response.crisis_type == 'regulatory' or calling_agent_response.crisis_type == 'data_breach'"
+      # Campaign-tied negative signal below the CMO floor → marketing
+      # manager so the live campaign can be paused (backs the narration:
+      # "negative sentiment concentrates on one live campaign"). Mutually
+      # exclusive with the cmo_human edge above (requires_cmo_action true).
+      - agent: "marketing_manager_human"
+        condition: "calling_agent_response.requires_cmo_action == false and calling_agent_response.campaign_id != ''"
+    auto_store_response: true
+    auto_store_yields: true
+
+  # ────────────────────────────────────────────────────────────
+  # campaign_orchestrator_agent — weekly sweep across live campaigns.
+  # Campaign state (what is live, spend pacing) lives in YOUR MAP
+  # (Marketo / HubSpot) — not in template Python. Pure connector-YAML:
+  # the n8n workflow sweeps your MAP and MUST return JSON in EXACTLY
+  # the declared yields shape below.
+  # ────────────────────────────────────────────────────────────
+  campaign_orchestrator_agent:
+    name: "campaign_orchestrator_agent"
+    agent_type: "programmatic"
+    description: "Weekly sweep across live campaigns — campaign state read from your MAP (Marketo/HubSpot); triggers performance analysis"
+    communication_type: "chain"
+    # wake_up: "0 9 * * 1"   # Monday 09:00 — enable after wiring your MAP (Marketo/HubSpot) connector
+    integration: "n8n"
+    connector_config:
+      # Your MAP campaign-sweep workflow URL — the n8n workflow fronts
+      # Marketo / HubSpot and returns the yields shape below.
+      webhook_url: "${N8N_CAMPAIGN_ORCHESTRATOR_WEBHOOK_URL:}"
+    yields:
+      week_id: "string"
+      campaigns_swept: "number"
+      flagged_for_review: "list"
+      sweep_completed_at_utc: "string"
+    inputs:
+      payload: "object"
+    can_call:
+      - agent: "marketing_analytics_agent"
+
+  # ════════════════════════════════════════════════════════════
+  # HUMAN ROSTER — channel-native HITL via the Hosted Studio inbox
+  # ════════════════════════════════════════════════════════════
+
+  marketing_manager_human:
+    name: "marketing_manager_human"
+    agent_type: "human"
+    is_human_powered: true
+    description: "Marketing manager — campaign approval, scale/pause decisions, calendar owner"
+    human_interface: "default"
+    communication_type: "dual"
+    human_timeout_seconds: 3600
+    # operator_ids: ["you@yourcompany.com"]   # optional — unset routes this
+    #   gate to the SHARED inbox. Only set real operator emails: a
+    #   placeholder assigns tasks to a nonexistent operator and they
+    #   never appear in anyone's inbox.
+    yields:
+      decision: "string"
+      notes: "string"
+    inputs:
+      campaign_id: "string"
+      strategy_summary: "string"
+      reviewer_briefing: "string"
+    human_prompt_template: |
+      Campaign approval — review the strategy, creative variants, and
+      compliance summary before approving for publish. Revise on tone /
+      audience / claim concerns. Escalate to CMO on budgets over 50K.
+    can_call:
+      - agent: "publisher_agent"
+        condition: "calling_agent_response.human_message == 'approve' or calling_agent_response.human_message == 'Approve' or calling_agent_response.human_message == 'Approved'"
+      - agent: "copywriter_agent"
+        condition: "calling_agent_response.human_message == 'revise'"
+      - agent: "cmo_human"
+        condition: "calling_agent_response.human_message == 'escalate'"
+      - agent: "marketing_audit_logger_agent"
+        condition: "calling_agent_response.human_message == 'hold'"
+
+  legal_reviewer_human:
+    name: "legal_reviewer_human"
+    agent_type: "human"
+    is_human_powered: true
+    description: "Legal — reviews regulated claims, comparative copy, disclaimers"
+    human_interface: "default"
+    communication_type: "dual"
+    human_timeout_seconds: 14400
+    # operator_ids: ["you@yourcompany.com"]   # optional — unset routes this
+    #   gate to the SHARED inbox. Only set real operator emails: a
+    #   placeholder assigns tasks to a nonexistent operator and they
+    #   never appear in anyone's inbox.
+    fallback_on_timeout: true
+    fallback_response:
+      decision: "hold"
+      message: "hold"
+      note: "Legal did not respond in 4h — campaign held for review (default-deny)"
+    yields:
+      decision: "string"
+      notes: "string"
+      required_disclaimers_final: "list"
+    inputs:
+      campaign_id: "string"
+      flagged_claims: "list"
+      required_disclaimers: "list"
+    human_prompt_template: |
+      Legal review — confirm claims are defensible, disclaimers are
+      adequate, and the comparative copy is fair. Default-deny on
+      ambiguity.
+    can_call:
+      - agent: "marketing_manager_human"
+        condition: "calling_agent_response.human_message == 'approve' or calling_agent_response.human_message == 'Approve' or calling_agent_response.human_message == 'Approved'"
+      - agent: "copywriter_agent"
+        condition: "calling_agent_response.human_message == 'revise'"
+      - agent: "marketing_audit_logger_agent"
+        condition: "calling_agent_response.human_message == 'hold'"
+
+  cmo_human:
+    name: "cmo_human"
+    agent_type: "human"
+    is_human_powered: true
+    description: "CMO — high-stakes campaigns, brand crises, budget escalations"
+    human_interface: "default"
+    communication_type: "dual"
+    human_timeout_seconds: 28800
+    # operator_ids: ["you@yourcompany.com"]   # optional — unset routes this
+    #   gate to the SHARED inbox. Only set real operator emails: a
+    #   placeholder assigns tasks to a nonexistent operator and they
+    #   never appear in anyone's inbox.
+    fallback_on_timeout: true
+    fallback_response:
+      decision: "hold"
+      message: "hold"
+      note: "CMO did not respond — campaign held (default-deny on high-value)"
+    yields:
+      decision: "string"
+      notes: "string"
+    inputs:
+      campaign_id: "string"
+      strategy_summary: "string"
+      cmo_briefing: "string"
+    human_prompt_template: |
+      CMO call — high-stakes campaign or brand crisis. Approve only
+      when budget, brand-fit, and timing are sound.
+    can_call:
+      - agent: "publisher_agent"
+        condition: "calling_agent_response.human_message == 'approve' or calling_agent_response.human_message == 'Approve' or calling_agent_response.human_message == 'Approved'"
+      - agent: "campaign_strategist_agent"
+        condition: "calling_agent_response.human_message == 'revise'"
+      - agent: "marketing_audit_logger_agent"
+        condition: "calling_agent_response.human_message == 'hold' or calling_agent_response.human_message == 'crisis_active'"
+
+  marketing_audit_logger_agent:
+    name: "marketing_audit_logger_agent"
+    agent_type: "programmatic"
+    description: "Writes immutable audit entry — terminus of every campaign flow"
+    communication_type: "chain"
+    yields:
+      audit_record_id: "string"
+      audit_hash: "string"
+      written_at_utc: "string"
+    inputs:
+      upstream_yields: "object"
+    auto_store_response: true
+    auto_store_yields: true
+
+  # ────────────────────────────────────────────────────────────
+  # social_media_agent — multi-platform variant generation +
+  # posting-plan proposal + engagement triage.
+  # Pure-YAML LLM — the template's scheduling SQLite is GONE: the
+  # posting calendar lives in YOUR social scheduler (Hootsuite /
+  # Buffer / Sprout Social). This agent drafts the variants and
+  # proposes the slots; your scheduler owns the real calendar.
+  # ────────────────────────────────────────────────────────────
+  social_media_agent:
+    name: "social_media_agent"
+    agent_type: "llm"
+    description: "Generates per-platform variants + a posting plan for your social scheduler; in triage mode classifies replies"
+    model: "claude-sonnet-4-6"
+    temperature: 0.5
+    max_completion_tokens: 2000
+    communication_type: "chain"
+
+    prompt: |
+      You are the social media manager on a marketing team. Two modes
+      (see input mode):
+
+      MODE "schedule" — given the campaign brief + creative, draft ONE
+      native variant per target platform and propose its posting slot.
+      Rules (apply exactly):
+      1. Platform rules — hard character limits (count characters):
+         - linkedin: limit 3000 — long-form, thought-leadership tone
+         - twitter: limit 280 — hook + 1-2 sentence elaboration,
+           hashtags <= 2
+         - instagram: limit 2200 — visual-first caption, emoji ok,
+           hashtags 5-10
+         - tiktok: limit 2200 — hook in the first 7 words, casual,
+           hashtags 3-5
+         - youtube: limit 5000
+         ONLY these five platforms are schedulable — ignore any other.
+      2. Propose each post at the platform's next best posting hour
+         (UTC, on the hour): linkedin 08/12/17, twitter 09/13/18/21,
+         instagram 11/14/19, tiktok 16/20/22, youtube 10/15/19.
+      3. scheduled: one object per drafted post — {post_id:
+         "post-<campaign_id>-<platform>", platform, variant_text,
+         scheduled_for_utc, char_count, char_limit}. scheduled_count =
+         its length. These are PROPOSALS for your social scheduler
+         (Hootsuite / Buffer / Sprout Social) — it owns the calendar.
+      4. A variant you cannot fit under the platform's limit: put the
+         platform name in rejected_for_length instead of scheduling it.
+         requires_copy_rewrite = true when rejected_for_length is
+         non-empty, else false.
+      5. action = "schedule". When campaign_id or the target platforms
+         are missing, action = "skipped" and every list stays empty.
+      6. Triage keys (triaged, triaged_count, escalations,
+         escalations_count, needs_crisis_responder) stay
+         empty / zero / false in this mode.
+
+      MODE "triage" — given replies (list of {reply_id, post_id,
+      text}), classify each reply. Rules (apply exactly):
+      1. category: positive | neutral | question | angry | spam;
+         urgency: 0..1.
+      2. Action per category: positive → "amplify", neutral →
+         "acknowledge", question → "respond", angry → "escalate",
+         spam → "ignore".
+      3. triaged: one object per reply {reply_id, post_id, category,
+         urgency, action}; triaged_count = its length.
+      4. escalations: every triaged entry that is angry OR has
+         urgency >= 0.8; escalations_count = its length.
+      5. needs_crisis_responder = true ONLY when at least one
+         escalation has urgency >= 0.9.
+      6. action = "triage". Schedule keys (scheduled, scheduled_count,
+         rejected_for_length, requires_copy_rewrite) stay
+         empty / zero / false in this mode.
+
+      OUTPUT CONTRACT — respond with ONLY valid JSON containing exactly these keys:
+      {"action": "", "campaign_id": "", "scheduled": [], "scheduled_count": 0, "rejected_for_length": [], "requires_copy_rewrite": false, "triaged_count": 0, "triaged": [], "escalations": [], "escalations_count": 0, "needs_crisis_responder": false}
+
+    enforce_yields: true
+
+    knowledge:
+      serviceName: "mongo_main"
+      enabled: true
+      groupName: "brand_voice"
+
+    yields:
+      action: "string"
+      campaign_id: "string"
+      scheduled: "list"
+      scheduled_count: "number"
+      rejected_for_length: "list"
+      requires_copy_rewrite: "boolean"
+      triaged_count: "number"
+      triaged: "list"
+      escalations: "list"
+      escalations_count: "number"
+      needs_crisis_responder: "boolean"
+
+    inputs:
+      mode: "string"                    # schedule | triage
+      upstream_yields: "object"
+      campaign_id: "string"
+      target_platforms: "list"
+      replies: "list"
+
+    can_call:
+      - agent: "publisher_agent"
+        condition: "calling_agent_response.action == 'schedule' and calling_agent_response.requires_copy_rewrite == false"
+
+      - agent: "copywriter_agent"
+        condition: "calling_agent_response.action == 'schedule' and calling_agent_response.requires_copy_rewrite == true"
+
+      # Triage with angry replies → brand guardian (crisis fast-path)
+      - agent: "brand_guardian_agent"
+        condition: "calling_agent_response.action == 'triage' and calling_agent_response.needs_crisis_responder == true"
+
+      - agent: "marketing_audit_logger_agent"
+        condition: "calling_agent_response.action == 'triage' and calling_agent_response.needs_crisis_responder == false"
+
+    auto_store_response: true
+    auto_store_yields: true
+
+  # ────────────────────────────────────────────────────────────
+  # aeo_geo_optimiser_agent — content audit for AI-answer-engines
+  # (ChatGPT / Perplexity / Gemini / Claude / Copilot pickup).
+  # Pure-YAML LLM — the old heuristic-scoring module + page-score
+  # SQLite are GONE: score history belongs in YOUR CMS / SEO platform.
+  # The full scoring rubric lives in the prompt below.
+  # ────────────────────────────────────────────────────────────
+  aeo_geo_optimiser_agent:
+    name: "aeo_geo_optimiser_agent"
+    agent_type: "llm"
+    description: "Scores existing pages for AEO/GEO fit; recommends specific rewrites by issue"
+    model: "gpt-4o-mini"
+    temperature: 0.1
+    max_tokens: 2000
+    communication_type: "chain"
+    # wake_up: "0 3 * * 0"   # Sunday 03:00 weekly sweep — enable after wiring a content feed that supplies `pages`
+
+    prompt: |
+      You are the AEO/GEO content auditor on a marketing team. Classic
+      SEO targets Google results; you target the AI answer engines that
+      increasingly intermediate the user's question. Score each page in
+      the input pages list (objects with url + content).
+
+      Scoring rubric (apply exactly — start each page at 0, then clamp
+      the final score to 0..1):
+        +0.15  H2/H3 subheadings present
+        +0.20  three or more question-shaped passages
+               ("what/how/why/when/where/which …?"); +0.10 when only
+               one or two
+        +0.10  definition pattern ("X is defined as", "means",
+               "refers to")
+        +0.15  three or more citation markers (according to / source: /
+               [1] / <cite / schema.org/citation); +0.08 for one or two
+        +0.10  JSON-LD / schema.org markup present
+        +0.10  author byline or publication-date metadata present
+        +0.10  content length 600-2500 words
+        -0.10  keyword stuffing (the same word repeated 5+ times in
+               close succession)
+        -0.05  thin intro (opening section under ~200 characters)
+
+      Issues to flag per page (use these exact labels):
+        no_subheadings, no_questions, no_definition, low_citations,
+        no_schema_markup, no_author_or_date, keyword_stuffing,
+        thin_intro, under_length (< 300 words), over_length
+        (> 4000 words).
+
+      Recommendation per issue (copy the matching line):
+        no_subheadings — "Add H2/H3 subheadings; answer engines prefer chunked content"
+        no_questions — "Add a 'Frequently asked questions' section with 3-5 Q&A pairs (30-60 word answers)"
+        no_definition — "Open with a definition (X is Y); answer engines cite these directly"
+        low_citations — "Add 3+ authoritative citations with schema.org/citation markup"
+        no_schema_markup — "Add JSON-LD Article schema with author, datePublished, mainEntity"
+        no_author_or_date — "Add author byline + publication date; signals freshness + authority"
+        keyword_stuffing — "Reduce keyword repetition; answer engines penalise this aggressively"
+        thin_intro — "Expand intro to 150-200 words that directly answer the title question"
+        under_length — "Expand to 800-1200 words; under 300 rarely cited"
+        over_length — "Split into a series; over 4000 words buries key answers"
+
+      Output rules (apply exactly):
+      1. scored_pages: one object per page — {url, aeo_score (2
+         decimals), issues, recommendations}.
+      2. total_pages = number of pages scored; average_score = mean
+         aeo_score rounded to 2 decimals.
+      3. A page needs a rewrite when aeo_score < 0.5;
+         needs_rewrite_count = how many.
+      4. high_priority_rewrites: the 10 LOWEST-scoring pages among
+         those needing a rewrite, worst first.
+      5. requires_content_team_review = true when
+         needs_rewrite_count > 0.
+      6. Empty or missing pages input: every list empty, every number
+         0, requires_content_team_review false.
+
+      OUTPUT CONTRACT — respond with ONLY valid JSON containing exactly these keys:
+      {"scored_pages": [], "total_pages": 0, "average_score": 0, "needs_rewrite_count": 0, "high_priority_rewrites": [], "requires_content_team_review": false}
+
+    yields:
+      scored_pages: "list"
+      total_pages: "number"
+      average_score: "number"
+      needs_rewrite_count: "number"
+      high_priority_rewrites: "list"
+      requires_content_team_review: "boolean"
+
+    inputs:
+      pages: "list"
+
+    can_call:
+      - agent: "copywriter_agent"
+        condition: "calling_agent_response.requires_content_team_review == true"
+
+      - agent: "marketing_audit_logger_agent"
+        condition: "calling_agent_response.requires_content_team_review == false"
+
+    auto_store_response: true
+    auto_store_yields: true

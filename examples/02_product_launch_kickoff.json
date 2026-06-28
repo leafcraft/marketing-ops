@@ -1,0 +1,17 @@
+{
+  "_entry_point": "product_launch",
+  "_description": "Product team triggers cross-functional launch \u2014 campaign_strategist anchors, market_intelligence (audience + competitor) feeds in.",
+  "payload": {
+    "campaign_id": "camp-2026-q3-platform",
+    "brief_source": "launch",
+    "product_or_topic": "Platform v3.0 \u2014 analytics + workflows",
+    "target_market": "Existing customers + competitive evaluators",
+    "objectives": [
+      "upsell_existing",
+      "win_competitive"
+    ],
+    "budget_cents": 18000000,
+    "launch_date_utc": "2026-07-22T13:00:00Z",
+    "regulated_industry": false
+  }
+}

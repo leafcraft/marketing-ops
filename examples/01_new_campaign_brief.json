@@ -1,0 +1,18 @@
+{
+  "_entry_point": "new_brief",
+  "_description": "Marketing manager files brief for spring product launch \u2014 full chain through strategist (brief normalised) \u2192 market intelligence \u2192 strategy \u2192 copy + visual \u2192 compliance \u2192 approval \u2192 publish.",
+  "payload": {
+    "campaign_id": "camp-2026-spring-launch",
+    "brief_source": "form",
+    "product_or_topic": "Pro Tier 2.0 launch",
+    "target_market": "Mid-market SaaS engineering teams (US, UK, DACH)",
+    "objectives": [
+      "awareness",
+      "demo_signups"
+    ],
+    "budget_cents": 6800000,
+    "deadline_utc": "2026-06-25T00:00:00Z",
+    "primary_kpi": "demo_signups",
+    "kpi_target": 850
+  }
+}
