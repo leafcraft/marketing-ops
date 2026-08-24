@@ -244,3 +244,108 @@ def get_competitor_signals(target_market: str) -> list[dict[str, Any]]:
 def get_performance(target_market: str) -> dict[str, Any]:
     data = _seed_once("performance", _SEED_PERFORMANCE)
     return dict(data.get(target_market) or {})
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# FINISHER SUPPORT — publisher outbox + append-only ledger + post-gate
+# recovery. Dev stand-ins for the ad platforms / your system of record; the
+# function SIGNATURES are the contract you swap real systems into.
+# ═══════════════════════════════════════════════════════════════════════
+def record_outbox(entry: dict[str, Any]) -> dict[str, Any]:
+    """The publisher's outward sends (Meta/IG/LinkedIn/ESP dispatch records)."""
+    with _LOCK:
+        outbox = _load("outbox")
+        rows = outbox.get("rows") if isinstance(outbox.get("rows"), list) else []
+        rec = {"recorded_at": _now(), **entry}
+        rows.append(rec)
+        _save("outbox", {"rows": rows})
+    return rec
+
+
+def append_ledger(entry: dict[str, Any]) -> dict[str, Any]:
+    """Append-only publish ledger (dev mirror of the WORM sink for local demo)."""
+    with _LOCK:
+        ledger = _load("publish_ledger")
+        rows = ledger.get("rows") if isinstance(ledger.get("rows"), list) else []
+        rec = {"recorded_at": _now(), **entry}
+        rows.append(rec)
+        _save("publish_ledger", {"rows": rows})
+    return rec
+
+
+def put_approved_campaign(campaign_id: str, pack: dict[str, Any]) -> None:
+    """Dev-store recovery mirror — the finisher's last-resort read after the
+    HITL gate when the in-process stash is cold (e.g. a restart)."""
+    if not campaign_id:
+        return
+    with _LOCK:
+        data = _load("approved_campaigns")
+        data[campaign_id] = {"stored_at": _now(), **pack}
+        _save("approved_campaigns", data)
+
+
+def get_approved_campaign(campaign_id: str) -> dict[str, Any]:
+    if not campaign_id:
+        return {}
+    return dict(_load("approved_campaigns").get(campaign_id) or {})
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# AEO/GEO AUDIT BACKLOG — the page queue the parallel instances split via the
+# atomic claim tool (claim_audit_batch). Seeded so the weekly sweep runs day-0
+# with no CMS/SEO connector wired. In production, claim_audit_batch pops from
+# your content pipeline instead.
+# ═══════════════════════════════════════════════════════════════════════
+_SEED_AUDIT_PAGES: list[dict[str, Any]] = [
+    {"url": "/blog/what-is-platform-engineering",
+     "content": ("Platform engineering is defined as the practice of building "
+                 "internal developer platforms. What is a golden path? How does "
+                 "it reduce toil? According to Gartner, 80% of orgs will have a "
+                 "platform team by 2026. <cite>source: DORA</cite>")},
+    {"url": "/product/pro-tier",
+     "content": "Pro Tier. Pro Tier. Pro Tier. Pro Tier. Pro Tier. Buy now."},
+    {"url": "/guides/build-vs-buy",
+     "content": ("Build versus buy: a decision guide. When should you build? "
+                 "Why does buying win for undifferentiated work? This guide walks "
+                 "through the trade-offs with examples and a scoring rubric that "
+                 "many teams adapt for their own context and budget cycles.")},
+    {"url": "/pricing",
+     "content": "Pricing page with plans and a comparison table."},
+    {"url": "/blog/observability-101",
+     "content": ("Observability refers to understanding a system from its "
+                 "outputs. What are the three pillars? How do traces help? "
+                 "According to the OpenTelemetry docs, spans model work units. "
+                 "[1] Author: A. Rivera. Published 2026-02-01.")},
+]
+
+
+def _seed_audit_queue() -> dict[str, Any]:
+    with _LOCK:
+        data = _load("audit_queue")
+        if not data or not isinstance(data.get("pages"), list):
+            data = {"pages": [dict(p) for p in _SEED_AUDIT_PAGES]}
+            _save("audit_queue", data)
+        return data
+
+
+def claim_audit_pages(batch_size: int = 2) -> list[dict[str, Any]]:
+    """Atomically claim (pop) up to batch_size pages from the audit backlog.
+
+    The atomic claim under a lock is what lets N parallel instances split the
+    backlog instead of duplicating it (2.4.118 instances pattern). Returns [] when
+    the queue is drained — the caller then reports total_pages 0, not a guess.
+    """
+    try:
+        n = max(0, int(batch_size))
+    except (TypeError, ValueError):
+        n = 0
+    if n == 0:
+        return []
+    with _LOCK:
+        data = _load("audit_queue")
+        if not isinstance(data.get("pages"), list):
+            data = {"pages": [dict(p) for p in _SEED_AUDIT_PAGES]}
+        pages = data.get("pages") or []
+        claimed, rest = pages[:n], pages[n:]
+        _save("audit_queue", {"pages": rest})
+    return [dict(p) for p in claimed]

@@ -1,20 +1,17 @@
-"""market_intelligence_agent — self-reliant analyst (Python REQUIRED).
+"""market_intelligence_agent — deterministic threat floor (Python REQUIRED).
 
-WHY THIS MODULE EXISTS (and is not pure YAML):
+WHY THIS MODULE EXISTS (and is not pure YAML): the analyst PULLS its own data
+in-turn through tools (read_audience_segments / read_competitor_signals /
+read_past_performance — the dev-store fallback for the CDP / competitive-intel
+mcp), so the model decides what to fetch. What CODE owns is the escalation floor:
 
-  @pre_compose load_market_data — the analyst pulls its OWN context: the
-      audience/segment data from the CDP, past-campaign performance, and
-      competitor signals from the competitive-intel platform (all from the
-      dev store day-0; connectors in prod). The LLM analyses real seed data
-      instead of inventing it.
+  @chain enforce_threat_floor — a DETERMINISTIC escalation floor: any competitor
+      signal at threat_level high|critical|severe is force-merged into
+      threat_alerts so the crisis fast-path to brand_guardian fires even if the
+      LLM under-reports. The LLM may add threats; it can never DROP a high-threat
+      competitor below the floor.
 
-  @chain enforce_threat_floor — a DETERMINISTIC escalation floor: any
-      competitor signal seeded/declared at threat_level high|critical|severe
-      is force-merged into threat_alerts so the crisis fast-path to
-      brand_guardian fires even if the LLM under-reports. The LLM may add
-      threats; it can never DROP a high-threat competitor below the floor.
-
-All segmentation/competitor narrative still lives in the YAML prompt.
+All segmentation/competitor narrative lives in the YAML prompt + the playbook.
 """
 from __future__ import annotations
 
@@ -22,7 +19,7 @@ import json
 import re
 from typing import Any
 
-from leafmesh import LeafMeshLogger, chain, pre_compose
+from leafmesh import LeafMeshLogger, chain
 
 from agency._shared import store
 
@@ -77,18 +74,6 @@ def _pick(input_data: dict[str, Any], key: str, default: Any = None) -> Any:
     return default
 
 
-# ── @pre_compose: the analyst pulls its OWN market data ──────────────────
-def load_market_data(data: Any, ctx: dict) -> dict[str, Any]:
-    input_data = data if isinstance(data, dict) else {}
-    market = str(_pick(input_data, "target_market", "") or "")
-    return {
-        "target_market": market,
-        "segment_data": store.get_segments(market),
-        "performance": store.get_performance(market),
-        "competitor_signals": store.get_competitor_signals(market),
-    }
-
-
 def high_threat_competitors(competitor_signals: Any) -> list[dict[str, Any]]:
     """Pure: competitors at high/critical/severe threat — the floor set."""
     out: list[dict[str, Any]] = []
@@ -124,7 +109,6 @@ async def enforce_threat_floor(result: dict, ctx: Any) -> dict[str, Any]:
     return result
 
 
-@pre_compose(context_processor=load_market_data)
 @chain(enforce_threat_floor)
 async def market_intelligence_agent(llm_response, input_data: dict, context: dict) -> dict[str, Any]:
     """Surface the analyst's read; carry competitor seeds to the floor."""

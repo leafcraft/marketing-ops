@@ -12,6 +12,16 @@ Python is kept ONLY where it must be: the fail-closed publisher
 actuator, the compliance pre-gate stash write, and the hash-chained
 audit sink (see agency/).
 
+Boot order matters (SDK 2.4.131):
+  1. import agency.tools  → the @global_tool decorators run BEFORE from_yaml/
+     start, so the intel tools (read_audience_segments / read_competitor_signals
+     / read_past_performance) and the AEO/GEO claim tool (claim_audit_batch)
+     are registered.
+  2. LeafMesh.from_yaml(...) → auto_discover wires agency/*_agent.py to the YAML.
+  3. audit_logger.register(...) → attach the WORM sink to the custom external
+     marketing_audit_logger_agent (must be after from_yaml, before start).
+  4. leafmesh.start().
+
 For full architecture: see README.md.
 """
 import asyncio
@@ -21,11 +31,18 @@ import sys
 from dotenv import load_dotenv
 from leafmesh import EventType, LeafMesh, LeafMeshLogger
 
+import agency.tools  # noqa: F401 — registers @global_tool tools before start()
+from agency._shared import audit_logger as _audit_logger
+
 
 load_dotenv()
 logger = LeafMeshLogger(__name__)
 
 leafmesh = LeafMesh.from_yaml("configs/config.yaml")
+
+# WORM audit sink — terminus for every campaign decision, publish, approval,
+# and held gate. Registered after from_yaml, before start (SDK 2.4+).
+_audit_logger.register(leafmesh, "marketing_audit_logger_agent")
 
 
 # ── Event-bus subscribers — marketing audit + ops surface ─────────

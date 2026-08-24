@@ -162,14 +162,18 @@ def total_budget_cents(budget_allocation: Any, fallback_cents: int = 0) -> int:
 async def enforce_spend_floor(result: dict, ctx: Any) -> dict[str, Any]:
     if not isinstance(result, dict):
         result = {}
+    cmo_approved = bool(result.pop("_cmo_approved", False))
     ceiling = int(result.pop("_max_unapproved_spend_cents", 0)
                   or store.max_unapproved_spend_cents())
     total = total_budget_cents(result.get("budget_allocation"),
                                result.get("budget_cents", 0))
-    result["requires_cmo_escalation"] = total > ceiling
+    # The CMO already signed the budget off on a resume — PROCEED to creative;
+    # never bounce it back to the CMO gate (that would loop forever over ceiling).
+    result["requires_cmo_escalation"] = False if cmo_approved else (total > ceiling)
     logger.info(
         f"[strategist] spend floor — total=${total/100:.0f} "
-        f"ceiling=${ceiling/100:.0f} cmo_escalation={result['requires_cmo_escalation']}"
+        f"ceiling=${ceiling/100:.0f} cmo_approved={cmo_approved} "
+        f"cmo_escalation={result['requires_cmo_escalation']}"
     )
     return result
 
@@ -215,6 +219,16 @@ async def campaign_strategist_agent(llm_response, input_data: dict, context: dic
     if not out["campaign_id"]:
         out["campaign_id"] = (_pick(input_data, "campaign_id", "")
                               or f"camp-{uuid.uuid4().hex[:10]}")
+
+    # A CMO resume means the budget is signed off — proceed to creative rather
+    # than looping back to intel or the CMO gate.
+    hm = str(input_data.get("human_message") or "").strip().lower()
+    fa = str(input_data.get("from_agent") or "")
+    cmo_approved = (fa == "cmo_human"
+                    and hm in {"approve", "approved", "yes", "ok", "sign", "signed"})
+    if cmo_approved:
+        out["needs_market_intelligence"] = False
+    out["_cmo_approved"] = cmo_approved
 
     # Carry the brand spend ceiling forward to the @chain floor.
     out["_max_unapproved_spend_cents"] = store.max_unapproved_spend_cents()
