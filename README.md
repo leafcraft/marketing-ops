@@ -4,8 +4,8 @@ A LeafMesh deployment that runs marketing operations end-to-end:
 brief → audience + competitor intel → strategy → copy + visuals →
 compliance → human approval → publish → performance + attribution. A
 peer-to-peer team of governed agents (Rule 1) — the Manager hovers
-above and intervenes only when narration / escalation / contract
-violations trigger.
+above: it raises hard or repeated errors to the CMO and alerts on
+contract violations; it does not route the work.
 
 ## Story — one brief, end to end
 
@@ -24,6 +24,11 @@ it hands back to the strategist, who now builds the strategy: KPIs,
 channel mix, budget allocation, a 4-week timeline, and flags the
 campaign for legal review because it makes a comparative claim.
 
+The plan spends $68K — over the brand's $50K ceiling — so the
+strategist's spend floor sends it to `cmo_human` before any creative
+work starts. The CMO signs off the budget ('approve'), and the
+strategist picks the same brief back up.
+
 The strategist fans out to `copywriter_agent` (three A/B/C variants
 per channel) and `visual_briefer_agent` (per-channel creative briefs +
 DALL·E prompts) in parallel. Both feed `compliance_reviewer_agent`,
@@ -32,8 +37,8 @@ which scores brand safety, catches the comparative claim, sets
 cross a **human gate** — its Python micro-module stashes the reviewed
 campaign context keyed by session. The flow routes to
 `legal_reviewer_human`. Legal confirms the claim is defensible and
-approves; routing passes to `marketing_manager_human`, who approves
-the spend.
+approves; routing passes to `marketing_manager_human`, who gives the
+final sign-off to publish.
 
 Only now does `publisher_agent` run. It reads the approved channel mix
 and budgets **from the pre-gate stash only** (never from LLM context),
@@ -85,16 +90,17 @@ Three tiers, grounded in `env` + `configs/config.yaml`.
 | Var | Required | What it does |
 |---|---|---|
 | `REDIS_HOST` / `REDIS_PORT` / `REDIS_PASSWORD` | optional | Session/auto-storage; defaults to `localhost:6379` no-auth (run `docker compose up redis -d`) |
-| `PAGER_WEBHOOK` | optional | PagerDuty-style webhook escalation target (manager escalation block) |
-| `SLACK_MARKETING_CHANNEL` | optional | Slack channel id for the manager's escalation `channel` target |
-| `SLACK_BOT_TOKEN` / `SLACK_SIGNING_SECRET` | optional | **Not plug-and-play** — read only by a Slack adapter you must wire in code/connector; the escalation `channel: slack` target needs that adapter to actually post |
+| *(vault connection `escalation_webhook`)* | optional | PagerDuty-style webhook escalation target (manager escalation block): create vault connection `escalation_webhook` (an "Add custom" record on the Infrastructure page, service type 'Outbound webhook'), then uncomment the webhook target (in `configs/config.yaml` before the first start, in Studio's YAML editor after it — see *Changing the configuration after the first start*) |
+| `SLACK_MARKETING_CHANNEL` | optional | Slack channel id for the manager's Slack escalation target — shipped commented in `config.yaml` |
+| *(Slack credentials)* | optional | **Not plug-and-play** — the bot token / signing secret go in the vault (Infrastructure → Messaging → Slack), never `.env`; the Slack target needs a Slack channel adapter (Slack connected on a human seat) before you uncomment it |
 
 ### Tier 3 — Connectors (wire to your systems; all optional)
 
 | Var | Required | What it does |
 |---|---|---|
-| `N8N_MARKETING_ANALYTICS_WEBHOOK_URL` | optional | n8n workflow fronting GA4 / Amplitude / Looker — `marketing_analytics_agent` |
-| `N8N_CAMPAIGN_ORCHESTRATOR_WEBHOOK_URL` | optional | n8n workflow fronting Marketo / HubSpot — `campaign_orchestrator_agent` weekly sweep |
+| *(vault connection `analytics_n8n`)* | optional | n8n workflow fronting GA4 / Amplitude / Looker — `marketing_analytics_agent` (its `connector_config` already picks `connection: analytics_n8n`; the webhook URL is the record's base URL) |
+| *(vault connection `map_n8n`)* | optional | n8n workflow fronting Marketo / HubSpot — `campaign_orchestrator_agent` weekly sweep (picks `connection: map_n8n`) |
+| *(vault connections `cdp_mcp` / `intel_mcp`)* | optional | CDP + competitive-intel MCP servers for `market_intelligence_agent` — create them, then uncomment its `mcp:` block (in `configs/config.yaml` before the first start, in Studio's YAML editor after it). The day-0 intel tools check whether these records exist, only to word an empty answer; nothing in `.env` switches them |
 | (social-listening) | optional | No env var — Brandwatch / Sprout / Talkwalker push rollups into the `brand_mention_ingest` / `brand_sentiment_sweep` entry points |
 | (social scheduler) | optional | No env var — `social_media_agent` drafts variants + proposes slots; Hootsuite / Buffer / Sprout Social owns the calendar |
 
@@ -148,8 +154,11 @@ them. Enterprise state lives in YOUR systems, not template SQLite.
   session stash only, never from LLM context.
 - `marketing_audit_logger_agent.py` — hash-chained WORM audit terminus.
 
-**Dev context store** (`agency/_shared/store.py`) — seeded with a
-realistic brief, brand guidelines + the banned-claim / legal-trigger
+**Dev context store** (`agency/_shared/store.py`) — seeded with four
+briefs that walk every route (a $68K launch over the $50K CMO ceiling
+with a comparative claim; an $18K webinar series that goes straight
+through; a $42K fintech launch that needs legal; a partner brief with no
+market or budget), brand guidelines + the banned-claim / legal-trigger
 lexicon, audience segments, past-campaign performance, and competitor
 signals, so the FULL chain runs end-to-end with **no connectors set**.
 In production, swap the store read calls for connector calls — the shape
@@ -171,7 +180,7 @@ the mesh reads is the contract.
                  ▼
        copywriter_agent + visual_briefer_agent (fan-out)
                  │ (wait_for both)
-                 ▼
+                 ▼    (a copy-only revise waits for the copy alone)
           compliance_reviewer_agent (LLM gate + pre-gate stash)
              │ clean                  │ requires_legal_review
              ▼                        ▼
@@ -190,7 +199,10 @@ the mesh reads is the contract.
 Parallel citizens: `campaign_orchestrator_agent` (weekly MAP sweep —
 cron commented until the connector is wired), `social_media_agent`
 (schedule + triage modes), `aeo_geo_optimiser_agent` (AI-answer-engine
-content audit).
+content audit — 3 parallel copies, `scaling.copies.count: 3`, each claiming a
+disjoint batch of pages with the atomic `claim_audit_batch` tool). 2.4.484's
+`scaling.copies.mode: auto` with `claim_tool: claim_audit_batch` could replace
+this manual split — an owner decision, not made in this template.
 
 ## The team
 
@@ -203,15 +215,15 @@ Role = the human job title each agent stands in for.
 | `copywriter_agent` | Copywriter | `@pre_compose` pulls brand voice + banned-claim lexicon; drafts 3 A/B/C variants per channel; `@chain` banned-term self-check forces `has_protected_claims` | → compliance_reviewer |
 | `visual_briefer_agent` | Art director / creative briefer | Builds per-channel visual briefs + DALL·E prompts; runs an audience-representation check when people imagery is involved | → compliance_reviewer |
 | `compliance_reviewer_agent` | Brand & compliance reviewer | `@pre_compose` pulls the banned-claim/legal-trigger lexicon; `@chain` scans copy — banned claim blocks publish, legal-trigger forces legal review (LLM can't waive) — then stashes the reviewed context pre-gate | → marketing_manager (clean), → legal_reviewer (`requires_legal_review`) |
-| `publisher_agent` | Publishing / ad-ops operator | Fail-closed multi-channel dispatch (Meta/IG/LinkedIn/Email); spends budget only from the approved pre-gate stash; tags impressions for attribution | → marketing_analytics |
+| `publisher_agent` | Publishing / ad-ops operator | Fail-closed multi-channel dispatch (Meta/IG/LinkedIn/Email); spends budget only from the approved pre-gate stash; publishes a campaign once (a second approval is blocked — no double spend); tags impressions for attribution | → marketing_analytics (published), → audit (always) |
 | `marketing_analytics_agent` | Marketing analytics lead | Reads KPI status, multi-touch attribution, email-engagement benchmarks from your analytics platform via n8n | → marketing_manager (`requires_manager_review`), → audit |
 | `campaign_orchestrator_agent` | Campaign operations coordinator | Weekly sweep of live campaigns + spend pacing from your MAP via n8n; flags campaigns needing review | → marketing_analytics |
 | `brand_guardian_agent` | Brand & PR crisis lead | Judges brand-sentiment rollups + drafts crisis response + holding statement; `@chain` crisis floor forces CMO on every crisis, recomputes the severe-spike rule, forces legal on regulatory/data-breach | → cmo (`requires_cmo_action`), → legal (regulatory/data-breach), → marketing_manager (campaign-tied signal below CMO floor) |
-| `social_media_agent` | Social media manager | Drafts per-platform native variants + proposes posting slots (schedule mode); classifies + triages replies (triage mode) | → publisher (fits), → copywriter (rewrite needed), → brand_guardian (crisis-grade replies), → audit |
+| `social_media_agent` | Social media manager | Drafts per-platform native variants + proposes posting slots (schedule mode); classifies + triages replies (triage mode) | → copywriter (rewrite needed), → brand_guardian (crisis-grade replies), → audit (proposals for your scheduler / clean triage) |
 | `aeo_geo_optimiser_agent` | AEO/GEO content optimiser | Scores pages for AI-answer-engine pickup against a full rubric; recommends issue-specific rewrites | → copywriter (rewrites needed), → audit |
-| `marketing_manager_human` | Marketing manager | Campaign approval, scale/pause, calendar ownership; escalates >$50K to CMO | → publisher (approve), → copywriter (revise), → cmo (escalate), → audit (hold) |
-| `legal_reviewer_human` | Legal counsel | Reviews regulated claims, comparative copy, disclaimers; default-deny on 4h timeout | → marketing_manager (approve), → copywriter (revise), → audit (hold) |
-| `cmo_human` | Chief Marketing Officer | High-stakes campaigns, brand crises, budget escalations; default-deny on 8h timeout | → publisher (approve), → campaign_strategist (revise), → audit (hold/crisis) |
+| `marketing_manager_human` | Marketing manager | Final campaign approval (8-hour window), pause decisions on a live campaign, performance reviews | → publisher (approve), → copywriter (revise), → audit (hold or any other reply); no answer in 8h → card closes, nothing published |
+| `legal_reviewer_human` | Legal counsel | Reviews regulated claims, comparative copy, disclaimers (24-hour window — one business day) | → coordinator → marketing manager (approve), → copywriter (revise), → audit (hold or any other reply); no answer in 24h → card closes, nothing published |
+| `cmo_human` | Chief Marketing Officer | Budgets over the $50K ceiling, brand crises, severe sentiment spikes; receives the Manager's error alerts (8-hour window) | → campaign_strategist (approve / revise), → audit (hold, crisis_active or any other reply); no answer in 8h → card closes, nothing approved |
 | `marketing_audit_logger_agent` | Compliance / audit recorder | Writes the hash-chained WORM record at every flow terminus | (terminus) |
 
 ## Quick start
@@ -243,6 +255,9 @@ curl -X POST http://127.0.0.1:18820/api/mesh/request \
   }'
 ```
 
+Any human gate the brief reaches (marketing manager, legal reviewer, CMO) lands
+in **Studio → Inbox** — answer it there.
+
 ## Entry points (Rule 1)
 
 | Entry point | Source | Target |
@@ -263,18 +278,21 @@ curl -X POST http://127.0.0.1:18820/api/mesh/request \
 
 1. **Analytics** — build an n8n workflow fronting GA4 / Amplitude /
    Looker that returns JSON in `marketing_analytics_agent`'s declared
-   yields shape; set `N8N_MARKETING_ANALYTICS_WEBHOOK_URL`.
+   yields shape; create the vault connection `analytics_n8n`
+   (Infrastructure → Integrations → n8n) with the workflow's webhook URL as its
+   base URL. The address is entered only in the vault — never in the config.
 2. **MAP sweep** — build an n8n workflow fronting Marketo / HubSpot
-   that returns `campaign_orchestrator_agent`'s yields shape; set
-   `N8N_CAMPAIGN_ORCHESTRATOR_WEBHOOK_URL`, then uncomment its
-   `wake_up: "0 9 * * 1"` cron in `configs/config.yaml`.
+   that returns `campaign_orchestrator_agent`'s yields shape; create the
+   vault connection `map_n8n` the same way, then uncomment its
+   `wake_up: "0 9 * * 1"` cron — in `configs/config.yaml` before the first
+   start, in Studio's YAML editor after it (applies live, no restart).
 3. **Social listening** — point Brandwatch / Sprout / Talkwalker
    webhooks at the `brand_mention_ingest` / `brand_sentiment_sweep`
    entry points with the rollup fields in the payload.
-4. **Slack escalation** — wire a Slack adapter that reads
-   `SLACK_BOT_TOKEN` / `SLACK_SIGNING_SECRET` so the manager's
-   escalation `channel: slack` target (`SLACK_MARKETING_CHANNEL`)
-   actually posts; until then that target is declared but inert.
+4. **Slack escalation** — add the Slack credentials as a vault connection
+   (Infrastructure → Messaging → Slack), connect Slack on a human seat so a
+   Slack channel adapter exists, set `SLACK_MARKETING_CHANNEL`, then
+   uncomment the manager's Slack escalation target (shipped commented).
 
 Missing yields are no problem: lenient yields enforcement fills any
 absent key with its type default, so downstream conditions always see
@@ -297,8 +315,14 @@ a known shape.
 - **Default-deny review** — compliance approves only with zero flagged
   claims, no protected-attribute risk, and brand-safety score ≥ 0.6;
   any high/critical/severe claim forces legal review
-- **Default-deny HITL timeouts** — legal (4h) and CMO (8h) timeouts
-  hold the campaign, never auto-approve
+- **Silence never publishes** — on leafmesh 2.4.486 a review nobody
+  answers in time (manager 8h, legal 24h, CMO 8h) closes its Inbox card
+  and the case records that no reply came. Nothing is published or
+  approved, and nobody is chased automatically. Each seat still declares
+  `fallback_response: held_for_review` (→ audit) as the intended timeout
+  answer.
+- **Publish once** — the publisher refuses a campaign the ledger already
+  shows as live, so a repeated approval never doubles the spend
 - **Crisis always lands on the CMO desk** — `requires_cmo_action` is
   forced true in crisis mode; regulatory / data-breach also routes to
   legal; a campaign-tied signal below the CMO floor routes to the
@@ -327,5 +351,34 @@ Test coverage:
   → CMO escalation over $50K; market-intel threat floor; brand-guardian
   crisis-pause floor (crisis → CMO, regulatory → legal, spike recompute);
   copywriter banned-term self-check; publisher fail-closed + stash bridge
-</content>
-</invoke>
+  + publish-once guard; every human reply reaches exactly one route
+
+## Changing the configuration after the first start
+
+`configs/config.yaml` is only the first-start seed. On the first start (an empty store) the agency imports it as version 1 and from then on keeps its configuration in the store. After that the file is not read again: an edit to it is **not** applied, even after a restart (the boot log says "that edit was NOT applied").
+
+To change a running agency:
+
+- **Studio** — its settings pages, or the raw YAML editor.
+- **API** — `PUT /api/yaml/raw` with an `X-API-Key` header and the body `{"yaml_content": "<the whole YAML>", "save_to_disk": true}`, or `PATCH /api/yaml/config` with `{"updates": {...}, "save_to_disk": true}`.
+
+Each save is a new version and applies live on every pod — no restart. (A few settings, such as brokers, make the agency reload itself in place within seconds.) So wherever this README or a comment says "uncomment X in `configs/config.yaml`", do it in the file before the first start, or in Studio's YAML editor after it.
+
+## Where the data store is set
+
+From leafmesh 2.4.482 the store (Redis or Postgres) is set **only in `.env`** — never in `configs/config.yaml`. A `persistence:` block in the YAML is ignored with a warning on leafmesh 2.4.482–2.4.485; from 2.4.486 the agency refuses to start if that block differs from `.env`, and names each `.env` line to add. The project's `.env` sets the store explicitly (`LEAFMESH_STORE`, `LEAFMESH_AGENCY_NAME`, `REDIS_*`).
+
+- Redis (default): `REDIS_HOST`, `REDIS_PORT`, `REDIS_PASSWORD`, `REDIS_DB`; optional `REDIS_DEFAULT_TTL`, `REDIS_SESSION_TTL`, `REDIS_SSL*`, `REDIS_CLUSTER_NODES`.
+- Postgres instead: `LEAFMESH_STORE=postgres` plus `POSTGRES_HOST`, `POSTGRES_PORT`, `POSTGRES_DB`, `POSTGRES_USER`, `POSTGRES_PASSWORD` (optional `POSTGRES_SSLMODE`).
+- Or the whole server in one value: `REDIS_URL=redis://user:pw@host:6379/0` (`rediss://` turns TLS on) or `DATABASE_URL=postgresql://user:pw@host:5432/db`. The single names fill in what the URL leaves out.
+- With Docker Compose the app reaches Redis as `redis` (the service name); compose sets that for you.
+- Check it in Studio → **Infrastructure → Datastores**: it shows whether the store is reachable (never the address or password).
+
+## Your vault key — back it up
+
+`create-leafmesh` put a `LEAFMESH_VAULT_KEY` in your `.env` when it made this project. It is the master key that encrypts every connection and credential you store in the vault (in Redis / Postgres).
+
+- **Back it up like a master password.** Lose it and every stored connection has to be entered again.
+- **Never change or regenerate it** for an existing project — a new key locks the existing vault. To change it, use `leafmesh vault rotate-key`.
+- Every copy of the app (every replica) must get the **same** value. Docker Compose passes it in from `.env` as an environment variable.
+- Never commit `.env` (it is already in `.gitignore`).

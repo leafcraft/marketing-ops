@@ -14,8 +14,10 @@ Production swaps `_dispatch_local` for S3 Object Lock / Datadog / Splunk HEC.
 Hash-chain invariant: each entry embeds the SHA-256 of the prior entry's body,
 so any insertion or deletion is detectable post-hoc. This sink is the TERMINUS
 for every outcome that matters — a published campaign, an approval, a triage
-outcome, AND every gate HELD on timeout (default-deny): a held campaign is
-recorded, never silently dropped.
+outcome, AND every gate a reviewer HELD: a held campaign is recorded, never
+silently dropped. (A review nobody answers is not written here on leafmesh
+2.4.486: its Inbox card closes, the ticket notes it, and main.py logs the
+HUMAN_INPUT_TIMEOUT event.)
 """
 from __future__ import annotations
 

@@ -1,7 +1,7 @@
 """publisher_agent — the FINISHER (multi-channel publish actuator).
 
 auto_discover matches `publisher_agent`. The publisher sits BEHIND the human
-approval gate. Publishing is outward and PAID, so it never trusts that *reaching*
+approval step. Publishing is outward and PAID, so it never trusts that *reaching*
 this agent means approved — it is the concrete "@chain fails closed":
 
   a) approval RE-CHECK — an allow-token allowlist + block-token denylist; an
@@ -143,6 +143,13 @@ def enforce_publish_floor(result: Any, context: dict) -> dict:
     # A deterministic invariant a human can't waive: compliance's verdict stands.
     if campaign.get("approved_for_publish") is False:
         return _block("compliance did not approve this campaign for publish")
+    # Paid spend goes out ONCE per campaign: a second approval (a manager
+    # answering a pause request or a performance review with 'approve', a
+    # replayed resume) must not buy the same media twice.
+    cid = str(campaign.get("campaign_id") or result.get("campaign_id") or "")
+    if cid and store.already_published(cid):
+        return _block(f"campaign {cid} is already live — publishing twice would "
+                      f"double the spend (change a live campaign in the ad platform)")
     channels = _channels(campaign)
     if not channels:
         # dev-store fallback announces itself here — nothing real to publish.
