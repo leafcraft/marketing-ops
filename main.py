@@ -5,8 +5,8 @@ Campaign briefs land via many channels; the team plans strategy,
 drafts copy + visuals, gates compliance, publishes after human
 approval, and reads performance from YOUR analytics platform / MAP
 via n8n connectors. A peer-to-peer TEAM of agents (Rule 1) — the
-Manager hovers above and intervenes only on narration / escalation /
-contract violations.
+Manager hovers above: it raises hard or repeated errors to the CMO and
+alerts on contract violations; it does not route the work.
 
 Python is kept ONLY where it must be: the fail-closed publisher
 actuator, the compliance pre-gate stash write, and the hash-chained
@@ -79,11 +79,8 @@ async def main():
     leafmesh.event_bus.subscribe(EventType.INTERVENTION_NEEDED,   _on_intervention_needed)
     leafmesh.event_bus.subscribe(EventType.HUMAN_INPUT_TIMEOUT,   _on_human_input_timeout)
 
-    try:
-        await leafmesh.enable_self_healing()
-        logger.info("Self-healing enabled (6 graduated recovery actions)")
-    except AttributeError:
-        pass
+    # Self-healing is automatic — the SDK enables it during start() on
+    # every operator-facing mesh. No call is needed.
 
     agents = (
         leafmesh.registry.list_agents()

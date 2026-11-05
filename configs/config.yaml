@@ -7,9 +7,11 @@
 # moves and brand crises run alongside.
 #
 # The pod is a TEAM, not a pipeline (Rule 1). A coordinator owns the case; the
-# Manager SUPERVISES and escalates stalls/violations; every wire is conditional;
-# every human gate DEFAULT-DENIES on silence; the FINISHER (publisher) produces
-# the real artifact and fails closed; the WORM sink is the terminus. Systems
+# Manager SUPERVISES (it raises hard or repeated errors to the CMO and alerts on
+# contract violations); every wire is conditional; nothing is published or
+# approved on silence (a review nobody answers closes its Inbox card and the
+# case records that no reply came); the FINISHER (publisher) produces the real
+# artifact and fails closed; the WORM sink is the terminus. Systems
 # (GA4/Amplitude/Looker, Marketo/HubSpot, Brandwatch, Meta/LinkedIn/ESP) are
 # TOOLS inside agents, never members.
 #
@@ -23,18 +25,6 @@ architecture: "managed_mesh"
 environment: "development"
 debug: true
 log_level: "INFO"
-
-persistence:
-  backend: redis
-  redis:
-    host: "${REDIS_HOST:localhost}"
-    port: ${REDIS_PORT:6379}
-    db: 0
-    password: "${REDIS_PASSWORD:}"
-    auto_storage: true
-    decode_responses: true
-    default_ttl: 86400
-    session_ttl: 604800
 
 auto_discover:
   directory: "./agency"
@@ -92,37 +82,40 @@ manager:
     targets:
       - type: "human_agent"
         agent: "cmo_human"
-      - type: "webhook"
-        url: "${PAGER_WEBHOOK:https://events.pagerduty.com/v2/enqueue}"
-        method: "POST"
-        headers:
-          Content-Type: "application/json"
-        payload_template:
-          incident_id: "{{campaign_id}}"
-          severity: "{{severity}}"
-          message: "{{message}}"
-          session_id: "{{session_id}}"
-      - type: "channel"
-        provider: "slack"
-        channel_id: "${SLACK_MARKETING_CHANNEL:}"
-        message_template: "[marketing] {{message}} — campaign {{campaign_id}}"
+      # Webhook escalation (e.g. PagerDuty): create the vault connection
+      # 'escalation_webhook' (an "Add custom" record on the Infrastructure
+      # page, service type 'Outbound webhook'), then uncomment — here before the
+      # first start, in Studio's YAML editor after it (applies live, no restart).
+      # - type: "webhook"
+        # connection: escalation_webhook   # vault connection holds the URL + headers
+        # method: "POST"
+        # payload_template:
+          # incident_id: "{{campaign_id}}"
+          # severity: "{{severity}}"
+          # message: "{{message}}"
+          # session_id: "{{session_id}}"
+      # Slack: the channel id is set in .env (SLACK_MARKETING_CHANNEL); posting
+      # needs a Slack channel adapter — connect Slack on a human seat (channels:
+      # {slack: {connection: <vault Slack record>}}, Infrastructure → Messaging →
+      # Slack), then uncomment. Left live with no adapter it only logs an error.
+      # - type: "channel"
+        # provider: "slack"
+        # channel_id: "${SLACK_MARKETING_CHANNEL:}"
+        # message_template: "[marketing] {{message}} — campaign {{campaign_id}}"
 
     auto_escalate:
       max_retries: 2
       max_errors_per_session: 3
-      timeout_threshold: 2
 
   health_check_interval: 60
   agent_timeout_threshold: 300
   chain_completion_timeout: 600
 
-mesh:
-  call_timeout: 120
-
 # 2.4.131 runtime block — creative + super-agent planning can run long. The
 # 2.4.131 default dropped to 90s; raise it so a multi-step strategist plan is
 # not cut off. (Omission is meaningful; this is the one non-default we need.)
 timeouts:
+  mesh_call_default_timeout_s: 120
   llm_hard_timeout_s: 300
 
 # ═══════════════════════════════════════════════════════════════════
@@ -377,15 +370,21 @@ agents:
     yields:
       campaign_id: "string"
       strategy_summary: "string"
-      kpis: "list"
-      channel_mix: "list"
-      budget_allocation: "list"
+      kpis:
+        type: array
+        items: {type: object, fields: {name: string, target: string, measurement_window: string}}
+      channel_mix:
+        type: array
+        items: {type: object, fields: {channel: string, share_pct: number, rationale: string}}
+      budget_allocation:             # must SUM to budget_cents (the spend floor re-sums it)
+        type: array
+        items: {type: object, fields: {channel: string, budget_cents: number}}
       timeline_weeks: "number"
       requires_legal_review: "boolean"
       brief_source: "string"
       product_or_topic: "string"
       target_market: "string"
-      objectives: "list"
+      objectives: {type: array, items: string}
       budget_cents: "number"
       received_at_utc: "string"
       needs_market_intelligence: "boolean"
@@ -477,34 +476,40 @@ agents:
         variables: [target_market]
     tools: [read_audience_segments, read_competitor_signals, read_past_performance]
     tool_categories: [intel]
-    # ── To wire a real CDP / competitive-intel platform, set the URL and
-    #    uncomment. Each named action under `use:` becomes its own tool
-    #    (e.g. cdp_read_segments). NOTE: the SDK rejects an http mcp block with
-    #    an EMPTY url at load, so this ships COMMENTED — fill the URL, then
-    #    uncomment. The dev-store tools above are the day-0 fallback contract. ──
+    # ── To wire a real CDP / competitive-intel platform: create the vault
+    #    connections 'cdp_mcp' and 'intel_mcp' on Infrastructure → Integrations → MCP
+    #    (each an MCP server's connection: its address + token), then
+    #    uncomment — here before the first start, in Studio's YAML editor after
+    #    it (applies live). Each named action under `use:` becomes its own tool (e.g.
+    #    cdp_read_segments). The address and token live only in the vault —
+    #    never write url:/token: here. agency/tools.py checks whether those
+    #    vault records exist (nothing in .env switches it). The dev-store
+    #    tools above are the day-0 fallback contract. ──
     # mcp:
-    #   - transport: http
-    #     url: "${CDP_MCP_URL}"
-    #     token: "${CDP_MCP_TOKEN:}"
+    #   - connection: cdp_mcp
+    #     transport: http
     #     use: [read_segments, read_personas]
     #     name: cdp
     #     timeout: 30
-    #   - transport: http
-    #     url: "${COMPETITIVE_INTEL_MCP_URL}"
-    #     token: "${COMPETITIVE_INTEL_MCP_TOKEN:}"
+    #   - connection: intel_mcp
+    #     transport: http
     #     use: [read_signals, read_share]
     #     name: intel
     #     timeout: 30
     yields:
-      primary_segments: "list"
-      persona_scores: "list"
+      primary_segments: {type: array, items: string}      # ranked by fit
+      persona_scores:
+        type: array
+        items: {type: object, fields: {persona: string, fit_score: number, why: string}}
       estimated_reach: "number"
-      exclusion_signals: "list"
+      exclusion_signals: {type: array, items: string}
       frequency_cap_recommendation: "number"
-      competitor_summary: "list"
+      competitor_summary:
+        type: array
+        items: {type: object, fields: {name: string, recent_move: string, threat_level: string}}
       market_share_signals: "string"
-      whitespace_opportunities: "list"
-      threat_alerts: "list"
+      whitespace_opportunities: {type: array, items: string}
+      threat_alerts: {type: array, items: string}         # one line per imminent threat
       intel_briefing: "string"
     inputs:
       upstream_yields: "object"
@@ -553,7 +558,9 @@ agents:
     enforce_yields: true
     enforce_yields_retry: 2
     yields:
-      variants_by_channel: "list"
+      variants_by_channel:
+        type: array
+        items: {type: object, fields: {channel: string, variants: {type: array, items: string}}}
       tone_used: "string"
       reading_grade: "number"
       has_protected_claims: "boolean"
@@ -595,10 +602,16 @@ agents:
     enforce_yields: true
     enforce_yields_retry: 2
     yields:
-      visual_briefs: "list"
+      visual_briefs:
+        type: array
+        items:
+          type: object
+          fields: {channel: string, format: string, aspect_ratio: string, mood: string, dominant_colors: {type: array, items: string}, must_show: string, must_avoid: string}
       has_people: "boolean"
-      representation_check: "list"
-      generation_prompts: "list"
+      representation_check: {type: array, items: string}
+      generation_prompts:
+        type: array
+        items: {type: object, fields: {channel: string, prompt_for_dalle3: string}}
       visual_briefing: "string"
     inputs:
       upstream_yields: "object"
@@ -626,7 +639,14 @@ agents:
     model: "gpt-4o-mini"
     temperature: 0.0
     max_tokens: 1500
-    wait_for: "copywriter_agent AND visual_briefer_agent"
+    # Waits for the copy; waits for the visual brief only when it was sent in
+    # the same fan-out ("?" = optional, still waited for while running). A
+    # copy-only revise (manager / legal 'revise', an AEO rewrite, a social
+    # length rewrite) reaches compliance from the copywriter alone — with the
+    # visual brief REQUIRED that path would park until wait_for_timeout and
+    # fail. On an update (the brief lands after the copy) compliance runs
+    # again: it only re-reviews and re-stashes — no outward action.
+    wait_for: "copywriter_agent AND visual_briefer_agent?"
     description: "Brand-safety + legal-claim review — gates the campaign before approval routing"
     prompt: |
       Review the campaign for brand safety + legal compliance. Return JSON with
@@ -657,8 +677,12 @@ agents:
       groupName: "brand_safety_rules"
     yields:
       brand_safety_score: "number"
-      flagged_claims: "list"
-      required_disclaimers: "list"
+      flagged_claims:
+        type: array
+        items: {type: object, fields: {claim: string, channel: string, risk_level: string}}
+      required_disclaimers:
+        type: array
+        items: {type: object, fields: {disclaimer_text: string, channel: string}}
       protected_attribute_risk: "boolean"
       requires_legal_review: "boolean"
       approved_for_publish: "boolean"
@@ -731,7 +755,7 @@ agents:
       crisis_type: "string"
       immediate_action: "string"
       holding_statement_draft: "string"
-      escalate_to: "list"
+      escalate_to: {type: array, items: string}     # roles: cmo, legal
       cmo_briefing: "string"
       campaign_id: "string"
       strategy_summary: "string"
@@ -741,7 +765,7 @@ agents:
       avg_sentiment_7d: "number"
       avg_sentiment_30d: "number"
       volume_change_pct: "number"
-      top_negative_sources: "list"
+      top_negative_sources: {type: array, items: string}
       severe_negative_spike: "boolean"
       requires_cmo_action: "boolean"
       sentiment_briefing: "string"
@@ -821,6 +845,10 @@ agents:
   # analytics platform (GA4 / Amplitude / Looker), not template SQLite. Pure
   # connector-YAML: the n8n workflow queries your platform and returns the
   # declared yields shape (lenient enforcement fills any missing key).
+  # The workflow's webhook address lives ONLY in the vault: create the vault
+  # connection 'analytics_n8n' (Infrastructure → Integrations → n8n, or an
+  # "Add custom" record, service type Tools, whose base URL is
+  # the workflow's webhook URL). Until it exists the connector stays inert.
   # ────────────────────────────────────────────────────────────
   marketing_analytics_agent:
     name: "marketing_analytics_agent"
@@ -829,7 +857,7 @@ agents:
     description: "Marketing Analytics — KPI status, multi-touch attribution, email-engagement benchmarks read from your analytics platform (GA4/Amplitude/Looker)"
     integration: "n8n"
     connector_config:
-      webhook_url: "${N8N_MARKETING_ANALYTICS_WEBHOOK_URL:}"
+      connection: analytics_n8n     # vault connection holds the webhook URL
     enforce_yields: true
     enforce_yields_retry: 2
     yields:
@@ -876,9 +904,12 @@ agents:
   # ────────────────────────────────────────────────────────────
   # campaign_orchestrator_agent — weekly sweep across live campaigns. Campaign
   # state (what is live, spend pacing) lives in YOUR MAP (Marketo / HubSpot).
-  # Pure connector-YAML. The wake_up stays COMMENTED until the MAP connector is
-  # wired — a cron firing into an empty webhook just errors; when you wire it,
-  # uncomment BOTH the cron AND the timezone (crons run in UTC otherwise).
+  # Pure connector-YAML: the workflow's webhook address lives ONLY in the vault
+  # connection 'map_n8n' (Infrastructure → Integrations → n8n). The wake_up stays
+  # COMMENTED until that connection exists — a cron firing into an unwired
+  # webhook just errors; when you wire it, uncomment BOTH the cron AND the
+  # timezone (crons run in UTC otherwise) — here before the first start, in
+  # Studio's YAML editor after it.
   # ────────────────────────────────────────────────────────────
   campaign_orchestrator_agent:
     name: "campaign_orchestrator_agent"
@@ -889,7 +920,7 @@ agents:
     # wake_up: "0 9 * * 1"        # Monday 09:00 — enable after wiring your MAP connector
     # timezone: "America/New_York"  # crons run in UTC without this (2.4.124+)
     connector_config:
-      webhook_url: "${N8N_CAMPAIGN_ORCHESTRATOR_WEBHOOK_URL:}"
+      connection: map_n8n           # vault connection holds the webhook URL
     yields:
       week_id: "string"
       campaigns_swept: "number"
@@ -957,13 +988,19 @@ agents:
     yields:
       action: "string"
       campaign_id: "string"
-      scheduled: "list"
+      scheduled:
+        type: array
+        items: {type: object, fields: {post_id: string, platform: string, variant_text: string, scheduled_for_utc: string, char_count: number, char_limit: number}}
       scheduled_count: "number"
-      rejected_for_length: "list"
+      rejected_for_length: {type: array, items: string}    # platforms
       requires_copy_rewrite: "boolean"
       triaged_count: "number"
-      triaged: "list"
-      escalations: "list"
+      triaged:
+        type: array
+        items: {type: object, fields: {reply_id: string, post_id: string, category: string, urgency: number, action: string}}
+      escalations:
+        type: array
+        items: {type: object, fields: {reply_id: string, post_id: string, category: string, urgency: number, action: string}}
       escalations_count: "number"
       needs_crisis_responder: "boolean"
     inputs:
@@ -981,7 +1018,7 @@ agents:
         condition: "calling_agent_response.action == 'triage' and calling_agent_response.needs_crisis_responder == true"
       # Proposals go to YOUR social scheduler (it owns the calendar) and a clean
       # triage is done — record the terminus. Social scheduling NEVER bypasses
-      # the human approval gate into the paid publisher; only an approved
+      # the human approval step into the paid publisher; only an approved
       # campaign reaches the finisher.
       - agent: "marketing_audit_logger_agent"
         condition: "(calling_agent_response.action == 'schedule' and calling_agent_response.requires_copy_rewrite == false) or (calling_agent_response.action == 'triage' and calling_agent_response.needs_crisis_responder == false)"
@@ -990,13 +1027,13 @@ agents:
 
   # ────────────────────────────────────────────────────────────
   # aeo_geo_optimiser_agent — content audit for AI answer engines (ChatGPT /
-  # Perplexity / Gemini / Claude / Copilot pickup). Runs as PARALLEL INSTANCES:
+  # Perplexity / Gemini / Claude / Copilot pickup). Runs as PARALLEL COPIES (scaling.copies):
   # one activation fans into N copies that each claim a DISJOINT batch of pages
   # via the atomic claim tool (claim_audit_batch), so a large backlog is split,
   # not duplicated. A LIVE weekly wake_up runs the sweep — with a timezone, so
   # it fires at 03:00 local, not 03:00 UTC. agency/aeo_geo_optimiser_agent.py
   # @chain reshape_combined recomputes average_score + re-trims
-  # high_priority_rewrites after the instance results are combined (a summed
+  # high_priority_rewrites after the copies' results are combined (a summed
   # average would be wrong).
   # ────────────────────────────────────────────────────────────
   aeo_geo_optimiser_agent:
@@ -1008,8 +1045,11 @@ agents:
     max_tokens: 2000
     max_tool_calls_per_message: 10   # claims a batch then scores each page
     description: "AEO/GEO Content Optimiser — scores pages for AI-answer-engine pickup; recommends issue-specific rewrites"
-    instances: 3                     # 3 parallel copies per activation (2.4.118+)
-    instances_handoff: last          # combine deterministically, route once
+    scaling:                      # 2.4.484 (was instances / instances_handoff)
+      copies:
+        mode: fixed
+        count: 3                     # 3 parallel copies per activation
+        handoff: last          # combine deterministically, route once
     wake_up: "0 3 * * 0"             # Sunday 03:00 weekly content sweep (LIVE)
     timezone: "America/New_York"     # crons run in UTC without this (2.4.124+)
     wake_up_input:
@@ -1053,11 +1093,15 @@ agents:
     tools: [claim_audit_batch]
     tool_categories: [audit]
     yields:
-      scored_pages: "list"
+      scored_pages:
+        type: array
+        items: {type: object, fields: {url: string, aeo_score: number, issues: {type: array, items: string}, recommendations: {type: array, items: string}}}
       total_pages: "number"
       average_score: "number"
       needs_rewrite_count: "number"
-      high_priority_rewrites: "list"
+      high_priority_rewrites:
+        type: array
+        items: {type: object, fields: {url: string, aeo_score: number, issues: {type: array, items: string}, recommendations: {type: array, items: string}}}
       requires_content_team_review: "boolean"
     inputs:
       mode: "string"
@@ -1071,9 +1115,11 @@ agents:
     auto_store_yields: true
 
   # ════════════════════════════════════════════════════════════
-  # HUMAN ROSTER — first-class members, reached in their own channel via the
-  # webhook boundary. Every gate DEFAULT-DENIES on timeout (fallback ->
-  # held_for_review -> audit). `dual` belongs ONLY on these human/boundary
+  # HUMAN ROSTER — first-class members, reached in the Inbox. Nothing is
+  # published or approved on silence: on leafmesh 2.4.486 a review nobody
+  # answers in time closes its Inbox card and the case records that no reply
+  # came. Each seat still declares fallback_response: held_for_review (-> audit)
+  # as the intended timeout answer. `dual` belongs ONLY on these human/boundary
   # agents; every AI specialist above is `chain` (dual↔dual auto-bounces —
   # gotcha #17). No human is wired directly to another human — the coordinator
   # or the Manager supervisor bridges them.
@@ -1082,27 +1128,26 @@ agents:
   marketing_manager_human:
     name: "marketing_manager_human"
     agent_type: "human"
-    human_interface: "webhook"
+    human_interface: "default"   # the Inbox (no vault connection needed)
     communication_type: "dual"
-    human_timeout_seconds: 3600
+    human_timeout_seconds: 28800   # 8h — same working day
     description: "Marketing Manager — campaign approval, scale/pause decisions, calendar owner"
     fallback_on_timeout: true
     fallback_response:
       human_decision: held
       human_message: held_for_review
-    webhook_config:
-      outbound_url: "${HITL_OUTBOUND_URL:http://127.0.0.1:9999/human-notify}"
-      outbound_headers: {Content-Type: "application/json"}
-      outbound_timeout: 30
-      max_retries: 1
-      retry_delay: 2
     human_prompt_template: |
       Campaign approval — review the strategy, creative variants, and compliance
-      summary before approving for publish. Revise on tone / audience / claim
-      concerns. Budgets over the brand ceiling are escalated to the CMO by the
-      supervisor automatically.
+      summary before approving for publish. Reply 'approve' to PUBLISH (the
+      publisher spends only the approved budget), 'revise' with notes to send
+      the copy back, or 'hold' to stop here. Any other reply is recorded and
+      nothing is published. Budgets over the $50K brand ceiling already went
+      to the CMO before any creative work started.
+      If nobody answers within 8 hours, the request waits no longer: its Inbox
+      card closes and the case records that no reply came. Nothing is
+      published on silence.
     yields:
-      human_message: "string"       # approve | revise | held_for_review
+      human_message: "string"       # approve | revise | hold
     inputs:
       campaign_id: "string"
       strategy_summary: "string"
@@ -1112,31 +1157,33 @@ agents:
         condition: "calling_agent_response.human_message == 'approve'"
       - agent: "copywriter_agent"
         condition: "calling_agent_response.human_message == 'revise'"
-      # On silence/hold, record it and let the Manager SUPERVISOR escalate to the
-      # CMO (manager.escalation.targets) — no hardcoded human→human wire.
+      # Hold / held_for_review / any other reply → recorded to the WORM sink;
+      # nothing is published. No human→human wire.
       - agent: "marketing_audit_logger_agent"
-        condition: "calling_agent_response.human_message == 'held_for_review' or calling_agent_response.human_message == 'hold'"
+        condition: "calling_agent_response.human_message != 'approve' and calling_agent_response.human_message != 'revise'"
 
   legal_reviewer_human:
     name: "legal_reviewer_human"
     agent_type: "human"
-    human_interface: "webhook"
+    human_interface: "default"   # the Inbox (no vault connection needed)
     communication_type: "dual"
-    human_timeout_seconds: 14400   # 4h; reminders as the supervisor sees fit
+    human_timeout_seconds: 86400   # 24h — one business day for a claims review
     description: "Legal Counsel — reviews regulated claims, comparative copy, disclaimers"
     fallback_on_timeout: true
     fallback_response:
       human_decision: held
       human_message: held_for_review
-    webhook_config:
-      outbound_url: "${HITL_OUTBOUND_URL:http://127.0.0.1:9999/human-notify}"
-      outbound_headers: {Content-Type: "application/json"}
-      outbound_timeout: 30
     human_prompt_template: |
       Legal review — confirm the claims are defensible, disclaimers are adequate,
-      and comparative copy is fair. Default-deny on ambiguity.
+      and comparative copy is fair. Reply 'approve' to clear the claims (the
+      marketing manager then gives final sign-off), 'revise' with the required
+      changes, or 'hold' to stop. Any other reply is recorded and nothing goes
+      further. Default-deny on ambiguity.
+      If nobody answers within 24 hours, the request waits no longer: its Inbox
+      card closes and the case records that no reply came. Nothing is
+      published on silence.
     yields:
-      human_message: "string"       # approve | revise | held_for_review
+      human_message: "string"       # approve | revise | hold
     inputs:
       campaign_id: "string"
       flagged_claims: "list"
@@ -1149,12 +1196,12 @@ agents:
       - agent: "copywriter_agent"
         condition: "calling_agent_response.human_message == 'revise'"
       - agent: "marketing_audit_logger_agent"
-        condition: "calling_agent_response.human_message == 'held_for_review' or calling_agent_response.human_message == 'hold'"
+        condition: "calling_agent_response.human_message != 'approve' and calling_agent_response.human_message != 'revise'"
 
   cmo_human:
     name: "cmo_human"
     agent_type: "human"
-    human_interface: "webhook"
+    human_interface: "default"   # the Inbox (no vault connection needed)
     communication_type: "dual"
     human_timeout_seconds: 28800   # 8h
     description: "Chief Marketing Officer — high-stakes campaigns, brand crises, budget escalations"
@@ -1162,15 +1209,19 @@ agents:
     fallback_response:
       human_decision: held
       human_message: held_for_review
-    webhook_config:
-      outbound_url: "${HITL_OUTBOUND_URL:http://127.0.0.1:9999/human-notify}"
-      outbound_headers: {Content-Type: "application/json"}
-      outbound_timeout: 30
     human_prompt_template: |
-      CMO call — high-stakes campaign, budget escalation, or brand crisis.
-      Approve only when budget, brand-fit, and timing are sound.
+      CMO call — a campaign budget over the $50K brand ceiling, a brand crisis,
+      or a severe negative-sentiment spike.
+      Budget: reply 'approve' to sign off the spend (the strategist then
+      briefs creative), 'revise' with notes to re-plan, or 'hold' to stop.
+      Crisis / spike: run the response with the team, then reply
+      'crisis_active' (or 'hold') to record your call.
+      Any other reply is recorded and nothing proceeds.
+      If nobody answers within 8 hours, the request waits no longer: its Inbox
+      card closes and the case records that no reply came. Nothing is
+      approved on silence.
     yields:
-      human_message: "string"       # approve | revise | held_for_review
+      human_message: "string"       # approve | revise | hold | crisis_active
     inputs:
       campaign_id: "string"
       strategy_summary: "string"
@@ -1181,7 +1232,7 @@ agents:
       - agent: "campaign_strategist_agent"
         condition: "calling_agent_response.human_message == 'approve' or calling_agent_response.human_message == 'revise'"
       - agent: "marketing_audit_logger_agent"
-        condition: "calling_agent_response.human_message == 'held_for_review' or calling_agent_response.human_message == 'hold' or calling_agent_response.human_message == 'crisis_active'"
+        condition: "calling_agent_response.human_message != 'approve' and calling_agent_response.human_message != 'revise'"
 
   # ────────────────────────────────────────────────────────────
   # marketing_audit_logger_agent — hash-chained WORM audit sink, the terminus of
@@ -1195,7 +1246,7 @@ agents:
     name: "marketing_audit_logger_agent"
     agent_type: "external"
     framework: "custom"
-    communication_type: "execute"
+    communication_type: "chain"
     description: "WORM audit — hash-chains every campaign decision, publish, approval, and held gate. Terminus."
     connector_config:
       sink_type: local_file

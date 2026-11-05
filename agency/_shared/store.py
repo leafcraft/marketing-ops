@@ -116,6 +116,43 @@ _SEED_BRIEFS: dict[str, Any] = {
                         "$68K, goals: awareness + demo signups. Worth a "
                         "comparative angle vs the incumbent."),
     },
+    # Under the $50K ceiling, no comparative or regulated claim — the happy
+    # path: strategist → creative → compliance → marketing manager → publish.
+    "camp-2026-q4-webinar-002": {
+        "campaign_id": "camp-2026-q4-webinar-002",
+        "brief_source": "asana",
+        "product_or_topic": "Platform engineering webinar series (3 sessions)",
+        "target_market": "Mid-market SaaS engineering teams",
+        "objectives": ["demo_signups"],
+        "budget_cents": 1_800_000,
+        "received_at_utc": "2026-10-28T09:30:00+00:00",
+        "raw_request": "Q4 webinar series, $18K across email + LinkedIn, goal 300 registrants.",
+    },
+    # Regulated industry (finance) — compliance forces legal review; under
+    # the ceiling, so no CMO sign-off.
+    "camp-2026-fin-003": {
+        "campaign_id": "camp-2026-fin-003",
+        "brief_source": "email",
+        "product_or_topic": "Spend analytics add-on for finance teams",
+        "target_market": "Fintech finance operations teams",
+        "objectives": ["pipeline", "demo_signups"],
+        "budget_cents": 4_200_000,
+        "received_at_utc": "2026-10-30T16:05:00+00:00",
+        "raw_request": "Launch the spend analytics add-on to fintech finance ops; "
+                       "$42K; LinkedIn + search. Mention the ROI study.",
+    },
+    # Missing data — no market, no budget, no objectives: the strategist must
+    # not invent them (normalise_brief playbook) and the plan stays empty.
+    "camp-2026-partner-004": {
+        "campaign_id": "camp-2026-partner-004",
+        "brief_source": "form",
+        "product_or_topic": "Partner co-marketing with a reseller",
+        "target_market": "",
+        "objectives": [],
+        "budget_cents": 0,
+        "received_at_utc": "2026-11-01T11:12:00+00:00",
+        "raw_request": "Co-marketing with our reseller — details TBC.",
+    },
 }
 
 # Audience / segment data — what a CDP would supply.
@@ -131,7 +168,18 @@ _SEED_SEGMENTS: dict[str, Any] = {
         ],
         "exclusion_signals": ["students", "job-seekers", "competitor staff"],
         "frequency_cap": 3,
-        "estimated_reach": 233000,
+        "estimated_reach": 233000,     # = 48,000 + 120,000 + 65,000
+    },
+    "Fintech finance operations teams": {
+        "segments": [
+            {"name": "Finance operations managers", "fit_score": 0.88,
+             "size": 21000, "why": "own spend controls and month-end close"},
+            {"name": "Controllers (Series B-D fintechs)", "fit_score": 0.79,
+             "size": 9500, "why": "sign off tooling budgets"},
+        ],
+        "exclusion_signals": ["consumers", "students", "competitor staff"],
+        "frequency_cap": 2,
+        "estimated_reach": 30500,      # = 21,000 + 9,500
     },
 }
 
@@ -151,6 +199,17 @@ _SEED_PERFORMANCE: dict[str, Any] = {
         ],
         "best_performing_channel": "email",
     },
+    "Fintech finance operations teams": {
+        "baseline_campaigns_count": 2,
+        "baseline_open_rate": 0.29,
+        "baseline_click_rate": 0.033,
+        "baseline_unsubscribe_rate": 0.004,
+        "channel_history": [
+            {"channel": "linkedin", "avg_cac_cents": 1_150_000, "avg_roas": 1.8},
+            {"channel": "search", "avg_cac_cents": 860_000, "avg_roas": 2.4},
+        ],
+        "best_performing_channel": "search",
+    },
 }
 
 # Competitor signals — what a competitive-intel platform would supply.
@@ -158,10 +217,14 @@ _SEED_COMPETITORS: dict[str, Any] = {
     "Mid-market SaaS engineering teams": [
         {"name": "Incumbent Corp", "recent_move": "cut entry price 20%",
          "threat_level": "high"},
-        {"name": "Upstart.io", "recent_move": "shipped an AI copilot beta",
+        {"name": "Quillstack", "recent_move": "shipped an AI copilot beta",
          "threat_level": "medium"},
         {"name": "LegacySoft", "recent_move": "no notable activity",
          "threat_level": "low"},
+    ],
+    "Fintech finance operations teams": [
+        {"name": "Ledgerline", "recent_move": "launched a free spend-audit tier",
+         "threat_level": "medium"},
     ],
 }
 
@@ -229,21 +292,34 @@ def put_brief(brief: dict[str, Any]) -> dict[str, Any]:
 
 
 # ── Audience / segments ──────────────────────────────────────────────────
+def _market_key(data: dict[str, Any], target_market: str) -> str:
+    """The seeded market a brief's target market refers to: an exact match,
+    or the seeded market it starts with ("Mid-market SaaS engineering teams
+    (US, UK, DACH)" → "Mid-market SaaS engineering teams")."""
+    tm = (target_market or "").strip()
+    if not tm or tm in data:
+        return tm
+    for key in data:
+        if tm.lower().startswith(key.lower()):
+            return key
+    return tm
+
+
 def get_segments(target_market: str) -> dict[str, Any]:
     data = _seed_once("segments", _SEED_SEGMENTS)
-    return dict(data.get(target_market) or {})
+    return dict(data.get(_market_key(data, target_market)) or {})
 
 
 # ── Competitor signals ───────────────────────────────────────────────────
 def get_competitor_signals(target_market: str) -> list[dict[str, Any]]:
     data = _seed_once("competitors", _SEED_COMPETITORS)
-    return list(data.get(target_market) or [])
+    return list(data.get(_market_key(data, target_market)) or [])
 
 
 # ── Past-campaign performance ────────────────────────────────────────────
 def get_performance(target_market: str) -> dict[str, Any]:
     data = _seed_once("performance", _SEED_PERFORMANCE)
-    return dict(data.get(target_market) or {})
+    return dict(data.get(_market_key(data, target_market)) or {})
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -273,6 +349,16 @@ def append_ledger(entry: dict[str, Any]) -> dict[str, Any]:
     return rec
 
 
+def already_published(campaign_id: str) -> bool:
+    """True when the publish ledger already records this campaign as live —
+    the publisher's double-spend guard."""
+    if not campaign_id:
+        return False
+    rows = _load("publish_ledger").get("rows") or []
+    return any(isinstance(r, dict) and r.get("campaign_id") == campaign_id
+               and r.get("event") == "published" for r in rows)
+
+
 def put_approved_campaign(campaign_id: str, pack: dict[str, Any]) -> None:
     """Dev-store recovery mirror — the finisher's last-resort read after the
     HITL gate when the in-process stash is cold (e.g. a restart)."""
@@ -291,7 +377,7 @@ def get_approved_campaign(campaign_id: str) -> dict[str, Any]:
 
 
 # ═══════════════════════════════════════════════════════════════════════
-# AEO/GEO AUDIT BACKLOG — the page queue the parallel instances split via the
+# AEO/GEO AUDIT BACKLOG — the page queue the parallel copies split via the
 # atomic claim tool (claim_audit_batch). Seeded so the weekly sweep runs day-0
 # with no CMS/SEO connector wired. In production, claim_audit_batch pops from
 # your content pipeline instead.
@@ -300,8 +386,9 @@ _SEED_AUDIT_PAGES: list[dict[str, Any]] = [
     {"url": "/blog/what-is-platform-engineering",
      "content": ("Platform engineering is defined as the practice of building "
                  "internal developer platforms. What is a golden path? How does "
-                 "it reduce toil? According to Gartner, 80% of orgs will have a "
-                 "platform team by 2026. <cite>source: DORA</cite>")},
+                 "it reduce toil? According to the 2026 Northwind platform survey, "
+                 "62% of teams surveyed run a platform team. "
+                 "<cite>source: Northwind Research 2026</cite>")},
     {"url": "/product/pro-tier",
      "content": "Pro Tier. Pro Tier. Pro Tier. Pro Tier. Pro Tier. Buy now."},
     {"url": "/guides/build-vs-buy",
@@ -314,7 +401,7 @@ _SEED_AUDIT_PAGES: list[dict[str, Any]] = [
     {"url": "/blog/observability-101",
      "content": ("Observability refers to understanding a system from its "
                  "outputs. What are the three pillars? How do traces help? "
-                 "According to the OpenTelemetry docs, spans model work units. "
+                 "According to our tracing guide, spans model units of work. "
                  "[1] Author: A. Rivera. Published 2026-02-01.")},
 ]
 
@@ -331,8 +418,8 @@ def _seed_audit_queue() -> dict[str, Any]:
 def claim_audit_pages(batch_size: int = 2) -> list[dict[str, Any]]:
     """Atomically claim (pop) up to batch_size pages from the audit backlog.
 
-    The atomic claim under a lock is what lets N parallel instances split the
-    backlog instead of duplicating it (2.4.118 instances pattern). Returns [] when
+    The atomic claim under a lock is what lets N parallel copies split the
+    backlog instead of duplicating it (scaling.copies). Returns [] when
     the queue is drained — the caller then reports total_pages 0, not a guess.
     """
     try:
