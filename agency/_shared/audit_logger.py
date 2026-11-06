@@ -1,12 +1,12 @@
 """Hash-chained WORM audit sink for the marketing-ops pod.
 
-`marketing_audit_logger_agent` in configs/config.yaml is `agent_type: external`
+`marketing_audit_logger_agent` in the configuration is `agent_type: external`
 with `framework: custom`. SDK 2.4+ executes custom external agents via an
 *intelligence function* registered on the LeafMesh instance:
 
     from agency._shared import audit_logger
-    leafmesh = LeafMesh.from_yaml("configs/config.yaml")
-    audit_logger.register(leafmesh, "marketing_audit_logger_agent")  # main.py, after from_yaml, before start
+    leafmesh = LeafMesh.from_store()
+    audit_logger.register(leafmesh, "marketing_audit_logger_agent")  # main.py, after from_store, before start
 
 Dev mode writes hash-chained JSON lines to ./logs/marketing_audit.jsonl.
 Production swaps `_dispatch_local` for S3 Object Lock / Datadog / Splunk HEC.
@@ -14,8 +14,10 @@ Production swaps `_dispatch_local` for S3 Object Lock / Datadog / Splunk HEC.
 Hash-chain invariant: each entry embeds the SHA-256 of the prior entry's body,
 so any insertion or deletion is detectable post-hoc. This sink is the TERMINUS
 for every outcome that matters — a published campaign, an approval, a triage
-outcome, AND every gate HELD on timeout (default-deny): a held campaign is
-recorded, never silently dropped.
+outcome, AND every gate a reviewer HELD: a held campaign is recorded, never
+silently dropped. (A review nobody answers is not written here on leafmesh
+2.4.486: its Inbox card closes, the ticket notes it, and main.py logs the
+HUMAN_INPUT_TIMEOUT event.)
 """
 from __future__ import annotations
 
@@ -89,7 +91,7 @@ def register(mesh: Any, agent_name: str = "marketing_audit_logger_agent") -> boo
     """Register the audit intelligence function on a LeafMesh instance.
 
     SDK 2.4+: custom external agents execute through
-    `mesh.intelligence("<agent_name>")`. Call AFTER `from_yaml()`, before `start()`.
+    `mesh.intelligence("<agent_name>")`. Call AFTER `from_store()`, before `start()`.
     """
     if not callable(getattr(mesh, "intelligence", None)):
         logger.warning("[audit] mesh has no .intelligence() — audit sink NOT registered")

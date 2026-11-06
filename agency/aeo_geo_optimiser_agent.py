@@ -1,9 +1,9 @@
 """aeo_geo_optimiser_agent — deterministic recombination floor (Python REQUIRED).
 
 WHY THIS MODULE EXISTS (and is not pure YAML): this agent runs as PARALLEL
-INSTANCES (config: `instances: 3`, `instances_handoff: last`). One activation
+COPIES (config: `scaling: {copies: {mode: fixed, count: 3, handoff: last}}`). One activation
 fans into three copies; each claims a DISJOINT batch of pages via the atomic
-`claim_audit_batch` tool and scores them. `instances_handoff: last` then COMBINES
+`claim_audit_batch` tool and scores them. `copies.handoff: last` then COMBINES
 the copies deterministically — lists concatenate, NUMBERS SUM. Summing is right
 for `total_pages` and `needs_rewrite_count`, but WRONG for a ratio: three copies
 each reporting `average_score: 0.6` would combine to `1.8`, and the three
@@ -20,7 +20,7 @@ per-copy `high_priority_rewrites` top-10 lists would concatenate to up to 30.
                                    worst first (re-trimmed, not concatenated)
         * requires_content_team_review = needs_rewrite_count > 0
 
-The floor is idempotent: on a single-instance run it recomputes the agent's own
+The floor is idempotent: on a single-copy run it recomputes the agent's own
 numbers unchanged. All scoring narrative lives in the YAML prompt.
 """
 from __future__ import annotations
@@ -105,7 +105,7 @@ async def reshape_combined(result: Any, ctx: Any) -> dict[str, Any]:
 
 @chain(reshape_combined)
 async def aeo_geo_optimiser_agent(llm_response, input_data: dict, context: dict) -> dict[str, Any]:
-    """Surface this instance's page scores; the @chain floor recombines the
+    """Surface this copy's page scores; the @chain floor recombines the
     parallel copies deterministically (mean, not sum, for the average)."""
     parsed = _parse_json(llm_response)
     out = {**_DEFAULTS}

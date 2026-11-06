@@ -83,11 +83,11 @@ Role = the human job title each agent stands in for.
 | `marketing_analytics_agent` | Marketing analytics lead | KPI status + attribution + email benchmarks from your platform | → manager / audit |
 | `campaign_orchestrator_agent` | Campaign operations coordinator | Weekly live-campaign + spend-pacing sweep from your MAP | → marketing_analytics |
 | `brand_guardian_agent` | Brand & PR crisis lead | Sentiment-spike judgment + crisis response/holding statement | → cmo / legal / manager |
-| `social_media_agent` | Social media manager | Per-platform variants + slot proposals; reply triage | → publisher / copywriter / brand_guardian / audit |
+| `social_media_agent` | Social media manager | Per-platform variants + slot proposals; reply triage | → copywriter / brand_guardian / audit |
 | `aeo_geo_optimiser_agent` | AEO/GEO content optimiser | Score pages for AI-answer-engine pickup; rewrite recommendations | → copywriter / audit |
-| `marketing_manager_human` | Marketing manager | Campaign approval, scale/pause, >$50K escalation | → publisher / copywriter / cmo / audit |
-| `legal_reviewer_human` | Legal counsel | Regulated/comparative-claim review; default-deny on 4h timeout | → manager / copywriter / audit |
-| `cmo_human` | Chief Marketing Officer | High-stakes campaigns, crises, budget escalations; default-deny on 8h | → publisher / campaign_strategist / audit |
+| `marketing_manager_human` | Marketing manager | Final campaign approval, pause / performance decisions; 8h window | → publisher / copywriter / audit |
+| `legal_reviewer_human` | Legal counsel | Regulated/comparative-claim review; 24h window | → coordinator (→ manager) / copywriter / audit |
+| `cmo_human` | Chief Marketing Officer | Budgets over the $50K ceiling, crises, severe spikes; 8h window | → campaign_strategist / audit |
 | `marketing_audit_logger_agent` | Compliance / audit recorder | Hash-chained WORM record at every terminus | (terminus) |
 
 ## Data artifacts
@@ -157,8 +157,11 @@ Role = the human job title each agent stands in for.
   day-0 with no connectors set. The `@pre_compose` processors read it in
   dev; connector calls replace the reads in prod (same shape).
 - **Human roster**: `marketing_manager_human`, `legal_reviewer_human`,
-  `cmo_human` — default human interface (Hosted Studio shared inbox),
-  default-deny `fallback_response` on timeout for legal + CMO.
+  `cmo_human` — default human interface (the Studio Inbox). Nothing is
+  published or approved on silence: on leafmesh 2.4.486 a review nobody
+  answers in time closes its card and the case records that no reply
+  came; each seat declares `fallback_response: held_for_review` as the
+  intended timeout answer.
 
 ## Entry points
 
@@ -188,8 +191,9 @@ debug entries to each non-human, non-terminal agent.
 - **No unreviewed publish** — `publisher_agent` runs only after the
   compliance gate AND a human approval; it reads from the pre-gate
   stash, never LLM context, and fails closed.
-- **Default-deny HITL** — legal (4h) and CMO (8h) timeouts hold the
-  campaign via `fallback_response`, never auto-approve. `operator_ids`
+- **Silence never publishes** — manager (8h), legal (24h) and CMO (8h):
+  a review nobody answers closes its card; nothing is published or
+  approved and nobody is chased automatically. `operator_ids`
   left unset → tasks land in the shared Studio inbox (a placeholder
   email would make them invisible).
 - **Crisis-pause floor** — `@chain enforce_crisis_floor` forces
@@ -208,12 +212,13 @@ debug entries to each non-human, non-terminal agent.
 Three tiers — see README "Configuration": Tier 1 boot
 (`LEAFMESH_LICENSE_KEY`, `LEAFMESH_ENV_TOKEN`, `OPENAI_API_KEY`;
 `ANTHROPIC_API_KEY` optional for `social_media_agent` + Summarizer),
-Tier 2 host + escalation adapters (Redis, `PAGER_WEBHOOK`,
-`SLACK_MARKETING_CHANNEL`; `SLACK_BOT_TOKEN`/`SLACK_SIGNING_SECRET`
-need a Slack adapter wired in code), Tier 3 connectors
-(`N8N_MARKETING_ANALYTICS_WEBHOOK_URL`,
-`N8N_CAMPAIGN_ORCHESTRATOR_WEBHOOK_URL`; social-listening + scheduler
-are webhook/connector, no env var).
+Tier 2 host + escalation adapters (Redis, `SLACK_MARKETING_CHANNEL`,
+vault connection `escalation_webhook` for the commented webhook target; Slack
+credentials go in the vault and need a Slack adapter wired in code), Tier 3
+connectors (vault connections `analytics_n8n` and `map_n8n`, already picked by
+the two n8n agents' `connector_config`; `cdp_mcp` / `intel_mcp` for the
+commented `mcp:` block; social-listening + scheduler are webhook/connector, no
+env var).
 
 ## Reflection / decisions
 
@@ -241,12 +246,11 @@ are webhook/connector, no env var).
   tamper-evident terminus. `visual_briefer`, `social_media`, and
   `aeo_geo_optimiser` stayed pure-YAML — their rules are fully expressible
   in the prompt and need no context-pull or floor.
-- **Slack escalation is honest about its gap.** The escalation
-  `channel: slack` target is declared, but `SLACK_BOT_TOKEN` /
-  `SLACK_SIGNING_SECRET` are consumed by no code — flagged in `env`
-  and the README as needing an adapter, not sold as plug-and-play.
+- **Slack escalation is honest about its gap.** The Slack escalation
+  target ships commented: it needs a Slack channel adapter (its
+  credentials live in the vault) — flagged in `env` and the README, not
+  sold as plug-and-play.
 - **Unproven runtime mechanics** flagged for a live smoke test: the
   `@chain` receiving the session transcript across a HITL resume, and
-  the n8n connectors' real round-trip shape. `from_yaml` proves the
+  the n8n connectors' real round-trip shape. A real `start()` proves the
   config loads under the real SDK; it does not prove these.
-</content>
