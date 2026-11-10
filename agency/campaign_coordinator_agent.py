@@ -11,7 +11,7 @@ Routing must not be hallucinated, so the module owns it:
   @chain derive_action — sets `action` DETERMINISTICALLY. `route_to_manager`
       (the gate-advancing route) is reachable ONLY when a reviewer actually
       approved: the LLM can never emit it to jump a fresh brief past strategy +
-      compliance to the approval gate.
+      compliance to the approval step.
 
   @compose — forwards the raw brief to the strategist on open_case, and recovers
       the reviewed campaign from the pre-gate session stash for the manager gate
